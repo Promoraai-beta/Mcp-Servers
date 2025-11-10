@@ -1,0 +1,9 @@
+{
+  "react": [
+    {"id": "bug_useeffect_deps", "description": "Missing dependency array in useEffect causing rerenders"},
+    {"id": "bug_key_prop", "description": "Missing key prop in list rendering"}
+  ],
+  "python": [
+    {"id": "bug_mutable_default", "description": "Mutable default argument in function"}
+  ]
+}
