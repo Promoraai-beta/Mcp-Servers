@@ -5,3 +5,7 @@ python-multipart>=0.0.6
 # MCP SDK for true MCP protocol
 mcp>=0.9.0
 openai>=1.50.0
+# Additional dependencies
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0

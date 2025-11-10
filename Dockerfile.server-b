@@ -1,0 +1,25 @@
+# MCP Server B: Template Builder + Project Generation
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY server-b-template-builder/requirements.txt ./requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy server source code
+COPY server-b-template-builder/src ./src
+COPY server-b-template-builder/src/templates ./src/templates
+
+# Set Python to unbuffered mode for stdio communication
+ENV PYTHONUNBUFFERED=1
+
+# Run the MCP server
+CMD ["python3", "src/server.py"]

@@ -1,0 +1,25 @@
+name: Deploy MCP Servers to EC2
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy MCP Servers
+    
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /opt/promora
+            ./scripts/ci-deploy.sh mcp
+
