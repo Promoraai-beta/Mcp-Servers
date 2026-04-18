@@ -3,15 +3,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements file
-COPY server-a-job-analysis/requirements.txt ./requirements.txt
-
 # Install Python dependencies
+COPY server-a-job-analysis/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy server source code
@@ -20,5 +13,8 @@ COPY server-a-job-analysis/src ./src
 # Set Python to unbuffered mode for stdio communication
 ENV PYTHONUNBUFFERED=1
 
-# Run the MCP server
+# Run as non-root user
+RUN useradd -r -u 1001 -m mcpuser
+USER mcpuser
+
 CMD ["python3", "src/server.py"]
