@@ -27,7 +27,7 @@ def get_tools() -> list[Tool]:
         ),
         Tool(
             name="generate_assessments",
-            description="Generate customized assessment recommendations (2-3 templates) based on job data. Analyzes the role type (Frontend/Backend/Data/Full-Stack), tech stack, and seniority level to recommend relevant assessment templates with duration and components.",
+            description="Generate customized assessment tasks (2-3) based on job data. Uses an LLM to analyse the role, tech stack, seniority level, and recruiter-selected component types (ide_project, leetcode, database, docs, sheets, design) to produce specific, rubric-ready tasks.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -42,6 +42,25 @@ def get_tools() -> list[Tool]:
                     "jobDescription": {
                         "type": "string",
                         "description": "Full job description text"
+                    },
+                    "assessmentPreferences": {
+                        "type": "object",
+                        "description": "Recruiter-selected assessment configuration",
+                        "properties": {
+                            "components": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Enabled component types: ide_project, leetcode, database, docs, sheets, design"
+                            },
+                            "ideLanguage": {
+                                "type": "string",
+                                "description": "Primary language for ide_project tasks (e.g. typescript, python)"
+                            },
+                            "timeLimitMinutes": {
+                                "type": "integer",
+                                "description": "Total assessment time budget in minutes (default 60)"
+                            }
+                        }
                     }
                 },
                 "required": ["jobTitle", "company", "jobDescription"]
@@ -59,6 +78,24 @@ def get_tools() -> list[Tool]:
                     }
                 },
                 "required": ["url"]
+            }
+        ),
+        Tool(
+            name="extract_skills",
+            description="Extract skills, role, seniority level, and assessment configuration from a job title and description. Returns a structured list of detected skills (with categories), inferred role/level, recommended IDE language, suggested assessment component types, recommended task count, and suggested bug categories. Use this before generate_assessments to give the recruiter a preview and let them adjust settings.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "jobTitle": {
+                        "type": "string",
+                        "description": "Job title (e.g. 'Senior React Developer')"
+                    },
+                    "jobDescription": {
+                        "type": "string",
+                        "description": "Full job description text to extract skills from"
+                    }
+                },
+                "required": ["jobTitle", "jobDescription"]
             }
         )
     ]

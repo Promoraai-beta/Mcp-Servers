@@ -1,0 +1,160 @@
+{
+  "frontend": {
+    "id": "frontend",
+    "displayName": "Frontend Engineer",
+    "aliases": ["Frontend", "frontend", "Frontend Engineer", "Frontend Developer", "UI/UX Design", "Frontend Development"],
+    "environment": "webcontainer",
+    "runtime": "browser",
+    "requiredBugTypes": [
+      "performance_trap",
+      "accessibility_bug",
+      "hallucinated_hook",
+      "misleading_ai_comment",
+      "state_logic_error"
+    ],
+    "aiMistakeTypes": [
+      "hallucinated_api",
+      "wrong_deps_array",
+      "missing_edge_case"
+    ],
+    "skillsMeasured": [
+      "blind_trust_vs_validation",
+      "edge_case_testing",
+      "state_logic_validation",
+      "post_ai_optimization",
+      "accessibility_awareness"
+    ],
+    "difficultyTiers": {
+      "easy": {
+        "bugCount": 3,
+        "traps": ["state_logic_error", "accessibility_bug", "misleading_ai_comment"]
+      },
+      "medium": {
+        "bugCount": 5,
+        "traps": ["performance_trap", "accessibility_bug", "hallucinated_hook", "misleading_ai_comment", "state_logic_error"]
+      },
+      "hard": {
+        "bugCount": 7,
+        "traps": ["performance_trap", "accessibility_bug", "hallucinated_hook", "misleading_ai_comment", "state_logic_error", "stale_closure", "no_error_handling"]
+      }
+    },
+    "checkpoints": [
+      { "id": "identify_issues", "prompt": "List the issues you found in the code", "order": 1 },
+      { "id": "fix_priority", "prompt": "Which issue would you fix first and why?", "order": 2 },
+      { "id": "explain_hallucination", "prompt": "Identify AI-generated code that is misleading or incorrect", "order": 3 },
+      { "id": "test_edge_cases", "prompt": "What edge cases did you test?", "order": 4 }
+    ],
+    "scoringRubric": {
+      "bug_discovery": { "weight": 0.25, "maxScore": 10 },
+      "fix_correctness": { "weight": 0.25, "maxScore": 10 },
+      "blind_trust_detection": { "weight": 0.15, "maxScore": 10 },
+      "code_quality": { "weight": 0.15, "maxScore": 10 },
+      "checkpoint_completion": { "weight": 0.1, "maxScore": 10 },
+      "ai_reliance": { "weight": 0.1, "maxScore": 10 }
+    }
+  },
+  "backend": {
+    "id": "backend",
+    "displayName": "Backend / API Engineer",
+    "aliases": ["Backend", "backend", "Backend Engineer", "Backend Developer", "API Engineer"],
+    "environment": "webcontainer",
+    "runtime": "node",
+    "requiredBugTypes": [
+      "security_flaw",
+      "spec_mismatch",
+      "validation_gap",
+      "inefficient_query",
+      "error_handling_gap"
+    ],
+    "aiMistakeTypes": [
+      "hallucinated_validation",
+      "wrong_schema",
+      "missing_sanitization"
+    ],
+    "skillsMeasured": [
+      "input_validation_awareness",
+      "security_hygiene",
+      "spec_compliance",
+      "error_handling",
+      "ai_output_sanity_check"
+    ],
+    "difficultyTiers": {
+      "easy": {
+        "bugCount": 3,
+        "traps": ["validation_gap", "error_handling_gap", "spec_mismatch"]
+      },
+      "medium": {
+        "bugCount": 5,
+        "traps": ["security_flaw", "spec_mismatch", "validation_gap", "error_handling_gap", "auth_missing"]
+      },
+      "hard": {
+        "bugCount": 7,
+        "traps": ["security_flaw", "spec_mismatch", "validation_gap", "error_handling_gap", "auth_missing", "auth_not_wired", "rate_limit_missing"]
+      }
+    },
+    "checkpoints": [
+      { "id": "identify_vulnerabilities", "prompt": "List any security concerns you found", "order": 1 },
+      { "id": "spec_vs_impl", "prompt": "Does the implementation match the OpenAPI spec?", "order": 2 },
+      { "id": "fix_validation", "prompt": "What input validation did you add?", "order": 3 },
+      { "id": "test_results", "prompt": "Which tests pass now and what did you fix?", "order": 4 }
+    ],
+    "scoringRubric": {
+      "bug_discovery": { "weight": 0.2, "maxScore": 10 },
+      "fix_correctness": { "weight": 0.2, "maxScore": 10 },
+      "security_awareness": { "weight": 0.2, "maxScore": 10 },
+      "code_quality": { "weight": 0.15, "maxScore": 10 },
+      "checkpoint_completion": { "weight": 0.15, "maxScore": 10 },
+      "ai_reliance": { "weight": 0.1, "maxScore": 10 }
+    }
+  },
+  "analyst": {
+    "id": "analyst",
+    "displayName": "Product Manager / Analyst",
+    "aliases": ["Analyst", "analyst", "Product Manager", "Product Analyst", "Data", "Data Analyst"],
+    "environment": "webcontainer",
+    "runtime": "browser",
+    "requiredBugTypes": [],
+    "aiMistakeTypes": [
+      "wrong_aggregation",
+      "missing_outliers",
+      "contradictory_assumption",
+      "hallucinated_data_point"
+    ],
+    "skillsMeasured": [
+      "data_validation",
+      "critical_review",
+      "assumption_clarity",
+      "communication",
+      "iterative_refinement"
+    ],
+    "difficultyTiers": {
+      "easy": {
+        "bugCount": 3,
+        "traps": ["wrong_aggregation", "hallucinated_data_point", "contradictory_assumption"]
+      },
+      "medium": {
+        "bugCount": 5,
+        "traps": ["wrong_aggregation", "missing_outliers", "contradictory_assumption", "hallucinated_data_point", "biased_directive"]
+      },
+      "hard": {
+        "bugCount": 7,
+        "traps": ["wrong_aggregation", "missing_outliers", "contradictory_assumption", "hallucinated_data_point", "biased_directive", "inconsistent_casing", "support_contradicts_sales"]
+      }
+    },
+    "checkpoints": [
+      { "id": "data_quality", "prompt": "List all data quality issues you found in the CSV", "order": 1 },
+      { "id": "ai_summary_critique", "prompt": "What errors did you find in the AI-generated summary?", "order": 2 },
+      { "id": "stakeholder_conflicts", "prompt": "How would you handle the conflicting stakeholder directives?", "order": 3 },
+      { "id": "corrected_analysis", "prompt": "Provide your corrected analysis with clean data", "order": 4 },
+      { "id": "recommendations", "prompt": "Give 3 data-backed recommendations", "order": 5 }
+    ],
+    "scoringRubric": {
+      "data_validation": { "weight": 0.2, "maxScore": 10 },
+      "bug_discovery": { "weight": 0.2, "maxScore": 10 },
+      "communication": { "weight": 0.2, "maxScore": 10 },
+      "checkpoint_completion": { "weight": 0.2, "maxScore": 10 },
+      "ai_reliance": { "weight": 0.1, "maxScore": 10 },
+      "code_quality": { "weight": 0.1, "maxScore": 10 }
+    }
+  }
+}

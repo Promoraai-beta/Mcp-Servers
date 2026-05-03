@@ -16,6 +16,24 @@ from utils.api_client import DatabaseAPIClient
 logger = logging.getLogger(__name__)
 
 
+# ── field helpers (Prisma returns camelCase; IDE may send snake_case) ─────────
+
+def _evt(e: Dict) -> str:
+    return e.get("eventType") or e.get("event_type") or ""
+
+def _prompt_text(e: Dict) -> str:
+    return e.get("promptText") or e.get("prompt_text") or ""
+
+def _code_snippet(e: Dict) -> str:
+    return e.get("codeSnippet") or e.get("code_snippet") or ""
+
+def _response_text(e: Dict) -> str:
+    return e.get("responseText") or e.get("response_text") or ""
+
+def _ts(e: Dict):
+    return e.get("timestamp") or e.get("created_at")
+
+
 async def flag_sanity_checks(session_id: str, events: Optional[List[Dict]] = None) -> Dict[str, Any]:
     """
     Flag suspicious behavior and perform risk assessment.
@@ -86,8 +104,8 @@ def _detect_violations(events: List[Dict]) -> List[Dict[str, Any]]:
     violations = []
     
     # Check for solution request patterns
-    prompts = [e for e in events if e.get("event_type") == "prompt_sent" and e.get("prompt_text")]
-    
+    prompts = [e for e in events if _evt(e) == "prompt_sent" and _prompt_text(e)]
+
     import re
     solution_patterns = [
         r"solve.*entire.*problem",
@@ -96,30 +114,30 @@ def _detect_violations(events: List[Dict]) -> List[Dict[str, Any]]:
         r"do.*whole.*thing",
         r"complete.*for.*me"
     ]
-    
+
     for prompt in prompts:
-        prompt_text = prompt.get("prompt_text", "").lower()
+        prompt_text = _prompt_text(prompt).lower()
         if any(re.search(pattern, prompt_text) for pattern in solution_patterns):
             violations.append({
                 "severity": "high",
                 "type": "solution_request_pattern",
                 "description": "Candidate requested complete solution",
-                "timestamp": prompt.get("timestamp", datetime.now()).isoformat() if isinstance(prompt.get("timestamp"), datetime) else str(prompt.get("timestamp", ""))
+                "timestamp": _ts(prompt) or str(datetime.now())
             })
-    
+
     # Check for excessive code copying
-    copy_events = [e for e in events if e.get("event_type") in ["code_copied_from_ai", "code_copied"]]
-    
+    copy_events = [e for e in events if _evt(e) in ["code_copied_from_ai", "code_copied"]]
+
     if len(copy_events) > 5:
         violations.append({
             "severity": "high",
             "type": "excessive_copying",
             "description": f"Excessive code copying: {len(copy_events)} copy events",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": str(datetime.now())
         })
-    
+
     # Check for suspicious timing (too fast completion)
-    modifications = [e for e in events if e.get("event_type") == "code_modified"]
+    modifications = [e for e in events if _evt(e) == "code_modified"]
     if len(modifications) < 3 and len(prompts) > 10:
         violations.append({
             "severity": "medium",
@@ -144,11 +162,11 @@ def _calculate_risk_score(violations: List[Dict], events: List[Dict]) -> int:
             base_score += 15
         else:
             base_score += 5
-    
+
     # Event pattern scoring
-    prompts = [e for e in events if e.get("event_type") == "prompt_sent"]
-    copies = [e for e in events if e.get("event_type") in ["code_copied_from_ai", "code_copied"]]
-    modifications = [e for e in events if e.get("event_type") == "code_modified"]
+    prompts = [e for e in events if _evt(e) == "prompt_sent"]
+    copies = [e for e in events if _evt(e) in ["code_copied_from_ai", "code_copied"]]
+    modifications = [e for e in events if _evt(e) == "code_modified"]
     
     # High copy-to-modification ratio = risk
     if modifications and copies:
@@ -171,8 +189,8 @@ def _detect_red_flags(events: List[Dict], submissions: List[Dict]) -> List[Dict[
     # Flag 1: Perfect solution with no modifications
     if submissions:
         perfect_submissions = [s for s in submissions if s.get("score", 0) == 100]
-        modifications = [e for e in events if e.get("event_type") == "code_modified"]
-        
+        modifications = [e for e in events if _evt(e) == "code_modified"]
+
         if perfect_submissions and len(modifications) < 3:
             red_flags.append({
                 "type": "perfect_solution_no_modifications",
@@ -187,7 +205,7 @@ def _detect_red_flags(events: List[Dict], submissions: List[Dict]) -> List[Dict[
         
         time_diff = _time_diff(first_event.get("timestamp"), last_event.get("timestamp"))
         if time_diff and time_diff < 300:  # Less than 5 minutes
-            modifications = [e for e in events if e.get("event_type") == "code_modified"]
+            modifications = [e for e in events if _evt(e) == "code_modified"]
             if len(modifications) > 10:
                 red_flags.append({
                     "type": "rapid_completion",
@@ -196,9 +214,9 @@ def _detect_red_flags(events: List[Dict], submissions: List[Dict]) -> List[Dict[
                 })
     
     # Flag 3: No code modifications, only copies
-    copies = [e for e in events if e.get("event_type") in ["code_copied_from_ai", "code_copied"]]
-    modifications = [e for e in events if e.get("event_type") == "code_modified"]
-    
+    copies = [e for e in events if _evt(e) in ["code_copied_from_ai", "code_copied"]]
+    modifications = [e for e in events if _evt(e) == "code_modified"]
+
     if copies and len(modifications) == 0:
         red_flags.append({
             "type": "no_modifications_only_copies",
@@ -261,15 +279,15 @@ def _analyze_plagiarism(submissions: List[Dict], events: List[Dict]) -> Dict[str
             analysis["confidence"] = 80
     
     # Check for code that matches AI responses exactly
-    copies = [e for e in events if e.get("event_type") in ["code_copied_from_ai", "code_copied"]]
-    responses = [e for e in events if e.get("event_type") == "response_received"]
-    
+    copies = [e for e in events if _evt(e) in ["code_copied_from_ai", "code_copied"]]
+    responses = [e for e in events if _evt(e) == "response_received"]
+
     if copies and responses:
         # Check if copied code matches any AI response
         for copy_event in copies:
-            copied_code = copy_event.get("code_snippet", "")
+            copied_code = _code_snippet(copy_event)
             for response in responses:
-                response_text = response.get("response_text", "")
+                response_text = _response_text(response)
                 if copied_code and response_text and copied_code in response_text:
                     analysis["suspicious"] = True
                     analysis["patterns"].append("code_matches_ai_response")

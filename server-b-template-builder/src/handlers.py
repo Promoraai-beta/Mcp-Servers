@@ -5,15 +5,15 @@ Contains the actual tool execution logic
 
 import json
 import logging
+import os
+import asyncio
 from typing import Any, Dict, List
 
 from mcp.types import TextContent
 
-from agents.agent_3_validator import validate_dependencies
-from agents.agent_4_leetcode_generator import generate_leetcode_problems
-import os
-from agents.agent_5_builder import build_webcontainer_structure
-from llm_generator import generate_with_llm
+from pipeline.agent_3_validator import validate_dependencies
+from pipeline.agent_4_leetcode_generator import generate_leetcode_problems
+from pipeline.agent_5_builder import build_webcontainer_structure
 
 logger = logging.getLogger(__name__)
 
@@ -60,67 +60,56 @@ async def handle_build_webcontainer_structure(arguments: dict[str, Any]) -> list
     skills_to_test = arguments.get("skillsToTest")
     problem_types = arguments.get("problemTypes")
     complexity = arguments.get("complexity", "medium")
-    
-    logger.info(f"Building WebContainer structure for {job_role or 'generic'} project")
+    company_name = arguments.get("companyName", "")
+    job_description = arguments.get("jobDescription", "")
+    variant_index = int(arguments.get("variantIndex", 0))
+    total_variants = int(arguments.get("totalVariants", 1))
 
-    # Per-request LLM overrides
-    arg_use_llm = arguments.get("useLLM")
-    env_use_llm = os.environ.get("USE_LLM", "false").lower() == "true"
-    use_llm = arg_use_llm if isinstance(arg_use_llm, bool) else env_use_llm
-    llm_model = arguments.get("llmModel") or os.environ.get("OPENAI_MODEL")
-    file_structure = {}
-    if use_llm:
-        logger.info("USE_LLM=true → attempting LLM project generation")
-        try:
-            file_structure = generate_with_llm(
-                job_role=job_role or "Frontend Developer",
-                experience_level=experience_level or "Mid-level",
-                tech_stack=tech_stack or [language],
-                tasks=tasks or [],
-                skills_to_test=skills_to_test or [],
-                problem_types=problem_types or [],
-                complexity=complexity or "medium",
-                model=llm_model,
-            )
-            # Sanitize common issues from LLM output
-            file_structure = _sanitize_llm_file_structure(file_structure, tech_stack)
-        except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
-            file_structure = {}
+    logger.info(f"Building WebContainer structure for {job_role or 'generic'} project (company: {company_name or 'unknown'}) [variant {variant_index + 1}/{total_variants}]")
 
-    # If LLM failed or disabled, fall back to deterministic builder
-    if not file_structure:
-        result = build_webcontainer_structure(
-            tasks=tasks,
-            problems=problems,
-            validated_deps=validated_deps,
-            tech_stack=tech_stack,
-            language=language,
-            job_role=job_role,
-            experience_level=experience_level,
-            skills_to_test=skills_to_test,
-            problem_types=problem_types,
-            complexity=complexity
-        )
-    else:
-        # Wrap LLM files into a template spec shape compatible with backend
-        # Choose defaults for runtime/package manager based on language/stack
-        runtime = "node" if any(t for t in (tech_stack or []) if str(t).lower() in ["react", "javascript", "typescript"]) else "browser"
-        package_manager = "npm" if runtime == "node" else "npm"
-        result = {
-            "name": f"assessment-{language}",
-            "runtime": runtime,
-            "packageManager": package_manager,
-            "dependencies": {},
-            "devDependencies": {},
-            "scripts": {},
-            "fileStructure": file_structure,
-        }
-    
+    result = build_webcontainer_structure(
+        tasks=tasks,
+        problems=problems,
+        validated_deps=validated_deps,
+        tech_stack=tech_stack,
+        language=language,
+        job_role=job_role,
+        experience_level=experience_level,
+        skills_to_test=skills_to_test,
+        problem_types=problem_types,
+        complexity=complexity,
+        company_name=company_name,
+        job_description=job_description,
+        variant_index=variant_index,
+        total_variants=total_variants,
+    )
+
     return [TextContent(
         type="text",
         text=json.dumps(result, indent=2)
     )]
+
+
+# Deprecated npm packages that no longer exist - map to their replacements
+_DEPRECATED_NPM_PACKAGES = {
+    "babel-core": "@babel/core",  # babel-core was deprecated in Babel 7
+    "babel-preset-env": "@babel/preset-env",
+    "babel-preset-react": "@babel/preset-react",
+}
+
+
+def _sanitize_deprecated_packages(pkg: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace deprecated npm packages with their modern equivalents."""
+    for dep_key in ("dependencies", "devDependencies"):
+        if dep_key not in pkg or not isinstance(pkg[dep_key], dict):
+            continue
+        deps = pkg[dep_key]
+        for old_name, new_name in _DEPRECATED_NPM_PACKAGES.items():
+            if old_name in deps:
+                version = deps.pop(old_name)
+                deps[new_name] = version
+                logger.info(f"Replaced deprecated {old_name} with {new_name}")
+    return pkg
 
 
 def _sanitize_llm_file_structure(file_structure: Dict[str, str], tech_stack: List[str]) -> Dict[str, str]:
@@ -142,12 +131,15 @@ def _sanitize_llm_file_structure(file_structure: Dict[str, str], tech_stack: Lis
     if "package.json" in normalized:
         try:
             # must be valid JSON – if not, try Python-literal to JSON upgrade
-            json.loads(normalized["package.json"])  # fast path
-        except Exception:
+            pkg = json.loads(normalized["package.json"])
+            pkg = _sanitize_deprecated_packages(pkg)
+            normalized["package.json"] = json.dumps(pkg, indent=2)
+        except json.JSONDecodeError:
             # Try to interpret as Python-like dict and convert to strict JSON
             try:
                 import ast
                 py_obj = ast.literal_eval(normalized["package.json"])  # may raise
+                py_obj = _sanitize_deprecated_packages(py_obj)
                 normalized["package.json"] = json.dumps(py_obj, indent=2)
             except Exception:
                 # Fall back to minimal known-good package.json
@@ -187,10 +179,87 @@ def _make_minimal_package_json(tech_stack: List[str]) -> Dict[str, Any]:
     return pkg
 
 
+async def handle_orchestrate_single_variant(arguments: dict[str, Any]) -> list[TextContent]:
+    """
+    Handle orchestrate_single_variant tool call.
+    Runs one TemplateBuilderAgent (OpenAI Agents SDK) to generate a fresh
+    unique code template for a single candidate invite.
+    """
+    from orchestrator import run_single_variant
+
+    job_role        = arguments.get("jobRole", "Full Stack Engineer")
+    tech_stack      = arguments.get("techStack", [])
+    experience_level= arguments.get("experienceLevel", "Mid-level")
+    complexity      = arguments.get("complexity", "medium")
+    company_name    = arguments.get("companyName", "")
+    job_description = arguments.get("jobDescription", "")
+    tasks           = arguments.get("tasks", [])
+    validated_deps  = arguments.get("validatedDeps", {})
+    variant_index   = int(arguments.get("variantIndex", 0))
+    num_bugs        = int(arguments.get("numBugs", 3))
+
+    logger.info(f"[Handler] orchestrate_single_variant role={job_role} variant={variant_index} num_bugs={num_bugs}")
+
+    result = await run_single_variant(
+        job_role=job_role,
+        tech_stack=tech_stack,
+        experience_level=experience_level,
+        complexity=complexity,
+        company_name=company_name,
+        job_description=job_description,
+        tasks=tasks,
+        validated_deps=validated_deps,
+        variant_index=variant_index,
+        num_bugs=num_bugs,
+    )
+
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+async def handle_orchestrate_bulk_variants(arguments: dict[str, Any]) -> list[TextContent]:
+    """
+    Handle orchestrate_bulk_variants tool call.
+    Runs up to 10 TemplateBuilderAgents in parallel (semaphore-capped) to generate
+    N unique variants for a bulk invite. 500 candidates → still only ≤10 LLM calls.
+    Each variant gets a distinct bug type assignment — same domain, different bugs.
+    """
+    from orchestrator import run_bulk_variants
+
+    job_role        = arguments.get("jobRole", "Full Stack Engineer")
+    tech_stack      = arguments.get("techStack", [])
+    variant_count   = int(arguments.get("variantCount", 1))
+    experience_level= arguments.get("experienceLevel", "Mid-level")
+    complexity      = arguments.get("complexity", "medium")
+    company_name    = arguments.get("companyName", "")
+    job_description = arguments.get("jobDescription", "")
+    tasks           = arguments.get("tasks", [])
+    validated_deps  = arguments.get("validatedDeps", {})
+    num_bugs        = int(arguments.get("numBugs", 3))
+
+    logger.info(f"[Handler] orchestrate_bulk_variants role={job_role} count={variant_count} num_bugs={num_bugs}")
+
+    results = await run_bulk_variants(
+        job_role=job_role,
+        tech_stack=tech_stack,
+        variant_count=variant_count,
+        experience_level=experience_level,
+        complexity=complexity,
+        company_name=company_name,
+        job_description=job_description,
+        tasks=tasks,
+        validated_deps=validated_deps,
+        num_bugs=num_bugs,
+    )
+
+    return [TextContent(type="text", text=json.dumps({"variants": results}, indent=2))]
+
+
 # Tool handler mapping
 TOOL_HANDLERS = {
-    "validate_dependencies": handle_validate_dependencies,
-    "generate_leetcode_problems": handle_generate_leetcode_problems,
-    "build_webcontainer_structure": handle_build_webcontainer_structure
+    "validate_dependencies":          handle_validate_dependencies,
+    "generate_leetcode_problems":     handle_generate_leetcode_problems,
+    "build_webcontainer_structure":   handle_build_webcontainer_structure,
+    "orchestrate_single_variant":     handle_orchestrate_single_variant,
+    "orchestrate_bulk_variants":      handle_orchestrate_bulk_variants,
 }
 

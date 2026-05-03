@@ -12,6 +12,7 @@ from mcp.types import TextContent
 from agents.agent_6_watcher import watch_session
 from agents.agent_7_executor import execute_analysis
 from agents.agent_8_sanity_flag import flag_sanity_checks
+from agents.agent_9_manifest_scorer import score_with_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +69,31 @@ async def handle_flag_sanity_checks(arguments: dict[str, Any]) -> list[TextConte
     )]
 
 
+async def handle_score_with_manifest(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle score_with_manifest tool call."""
+    session_id = arguments.get("sessionId")
+    manifest = arguments.get("manifest")
+    final_files = arguments.get("finalFiles")
+
+    if not session_id:
+        raise ValueError("sessionId is required")
+    if not manifest:
+        raise ValueError("manifest is required")
+
+    logger.info(f"Scoring session {session_id} with manifest (type={manifest.get('assessmentType')})")
+    result = await score_with_manifest(session_id, manifest, final_files)
+
+    return [TextContent(
+        type="text",
+        text=json.dumps(result, indent=2, default=str)
+    )]
+
+
 # Tool handler mapping
 TOOL_HANDLERS = {
     "watch_session": handle_watch_session,
     "execute_analysis": handle_execute_analysis,
-    "flag_sanity_checks": handle_flag_sanity_checks
+    "flag_sanity_checks": handle_flag_sanity_checks,
+    "score_with_manifest": handle_score_with_manifest,
 }
 

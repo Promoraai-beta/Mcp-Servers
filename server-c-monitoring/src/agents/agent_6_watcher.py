@@ -16,6 +16,25 @@ from utils.api_client import DatabaseAPIClient
 logger = logging.getLogger(__name__)
 
 
+# ── field helpers (Prisma returns camelCase; IDE may send snake_case) ─────────
+
+def _evt(e: Dict) -> str:
+    """Return event type regardless of camelCase vs snake_case."""
+    return e.get("eventType") or e.get("event_type") or ""
+
+def _prompt_text(e: Dict) -> str:
+    return e.get("promptText") or e.get("prompt_text") or ""
+
+def _code_snippet(e: Dict) -> str:
+    return e.get("codeSnippet") or e.get("code_snippet") or ""
+
+def _response_text(e: Dict) -> str:
+    return e.get("responseText") or e.get("response_text") or ""
+
+def _ts(e: Dict):
+    return e.get("timestamp") or e.get("created_at")
+
+
 async def watch_session(
     session_id: str,
     include_file_operations: bool = True,
@@ -97,40 +116,40 @@ def _detect_violations(
     violations = []
     
     # Check for large code copies
-    copy_events = [i for i in interactions if i.get("event_type") in ["code_copied_from_ai", "code_copied"]]
-    paste_events = [i for i in interactions if i.get("event_type") in ["code_pasted_from_ai", "code_pasted"]]
-    
+    copy_events = [i for i in interactions if _evt(i) in ["code_copied_from_ai", "code_copied"]]
+    paste_events = [i for i in interactions if _evt(i) in ["code_pasted_from_ai", "code_pasted"]]
+
     for copy_event in copy_events:
-        code_snippet = copy_event.get("code_snippet", "") or ""
+        code_snippet = _code_snippet(copy_event)
         lines = len(code_snippet.split("\n"))
-        
+
         if lines > 50:
             violations.append({
                 "severity": "high" if lines > 100 else "medium",
                 "type": "large_code_copy",
                 "description": f"Copied {lines} lines of code from AI",
-                "timestamp": copy_event.get("timestamp", datetime.now()).isoformat() if isinstance(copy_event.get("timestamp"), datetime) else str(copy_event.get("timestamp", ""))
+                "timestamp": _ts(copy_event) or str(datetime.now())
             })
-    
+
     # Check for solution requests
-    prompts = [i for i in interactions if i.get("event_type") == "prompt_sent" and i.get("prompt_text")]
-    
+    prompts = [i for i in interactions if _evt(i) == "prompt_sent" and _prompt_text(i)]
+
     red_flag_patterns = [
         "solve.*entire.*problem",
         "write.*complete.*code",
         "give.*full.*solution",
         "do.*whole.*thing"
     ]
-    
+
     import re
     for prompt_event in prompts:
-        prompt_text = prompt_event.get("prompt_text", "").lower()
+        prompt_text = _prompt_text(prompt_event).lower()
         if any(re.search(pattern, prompt_text) for pattern in red_flag_patterns):
             violations.append({
                 "severity": "high",
                 "type": "solution_request",
                 "description": "Candidate asked AI to solve the entire problem",
-                "timestamp": prompt_event.get("timestamp", datetime.now()).isoformat() if isinstance(prompt_event.get("timestamp"), datetime) else str(prompt_event.get("timestamp", ""))
+                "timestamp": _ts(prompt_event) or str(datetime.now())
             })
     
     # Check for suspicious file operations
@@ -208,24 +227,24 @@ def _build_timeline(
     # Add interactions
     for event in interactions:
         timeline.append({
-            "type": event.get("event_type", ""),
-            "timestamp": event.get("timestamp", datetime.now()).isoformat() if isinstance(event.get("timestamp"), datetime) else str(event.get("timestamp", "")),
+            "type": _evt(event),
+            "timestamp": _ts(event) or str(datetime.now()),
             "description": _get_event_description(event)
         })
-    
+
     # Add file operations
     for event in file_operations:
         timeline.append({
-            "type": event.get("event_type", ""),
-            "timestamp": event.get("timestamp", datetime.now()).isoformat() if isinstance(event.get("timestamp"), datetime) else str(event.get("timestamp", "")),
+            "type": _evt(event),
+            "timestamp": _ts(event) or str(datetime.now()),
             "description": _get_file_event_description(event)
         })
-    
+
     # Add terminal events
     for event in terminal_events:
         timeline.append({
-            "type": event.get("event_type", ""),
-            "timestamp": event.get("timestamp", datetime.now()).isoformat() if isinstance(event.get("timestamp"), datetime) else str(event.get("timestamp", "")),
+            "type": _evt(event),
+            "timestamp": _ts(event) or str(datetime.now()),
             "description": _get_terminal_event_description(event)
         })
     
@@ -237,16 +256,16 @@ def _build_timeline(
 
 def _get_event_description(event: Dict) -> str:
     """Get description for an interaction event."""
-    event_type = event.get("event_type", "")
-    
+    event_type = _evt(event)
+
     if event_type == "prompt_sent":
-        prompt_text = event.get("prompt_text", "")
-        return f"Asked: {prompt_text[:50]}..." if len(prompt_text) > 50 else f"Asked: {prompt_text}"
+        text = _prompt_text(event)
+        return f"Asked: {text[:50]}..." if len(text) > 50 else f"Asked: {text}"
     elif event_type == "response_received":
         return "Received AI response"
     elif event_type in ["code_copied_from_ai", "code_copied"]:
-        code_snippet = event.get("code_snippet", "")
-        lines = len(code_snippet.split("\n"))
+        snippet = _code_snippet(event)
+        lines = len(snippet.split("\n"))
         return f"Copied code ({lines} lines)"
     elif event_type == "code_modified":
         return "Modified code"
@@ -256,7 +275,7 @@ def _get_event_description(event: Dict) -> str:
 
 def _get_file_event_description(event: Dict) -> str:
     """Get description for a file operation event."""
-    event_type = event.get("event_type", "")
+    event_type = _evt(event)
     metadata = event.get("metadata", {})
     
     if isinstance(metadata, str):
@@ -284,7 +303,7 @@ def _get_file_event_description(event: Dict) -> str:
 
 def _get_terminal_event_description(event: Dict) -> str:
     """Get description for a terminal event."""
-    event_type = event.get("event_type", "")
+    event_type = _evt(event)
     metadata = event.get("metadata", {})
     
     if isinstance(metadata, str):
@@ -314,9 +333,9 @@ def _calculate_metrics(
         "totalInteractions": len(interactions),
         "totalFileOperations": len(file_operations),
         "totalTerminalEvents": len(terminal_events),
-        "fileCreates": len([f for f in file_operations if f.get("event_type") == "file_created"]),
-        "fileModifies": len([f for f in file_operations if f.get("event_type") == "file_modified"]),
-        "fileDeletes": len([f for f in file_operations if f.get("event_type") == "file_deleted"]),
-        "commandsExecuted": len([t for t in terminal_events if t.get("event_type") == "command_executed"])
+        "fileCreates": len([f for f in file_operations if _evt(f) == "file_created"]),
+        "fileModifies": len([f for f in file_operations if _evt(f) == "file_modified"]),
+        "fileDeletes": len([f for f in file_operations if _evt(f) == "file_deleted"]),
+        "commandsExecuted": len([t for t in terminal_events if _evt(t) == "command_executed"])
     }
 

@@ -71,6 +71,28 @@ def get_tools() -> list[Tool]:
                 },
                 "required": ["sessionId"]
             }
+        ),
+        Tool(
+            name="score_with_manifest",
+            description="Manifest-aware scoring: scores candidate work against the assessment manifest (contract from Server B). Compares final code to known injected bugs, checks expected signals, evaluates behavior, and produces a structured score report per rubric dimension.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sessionId": {
+                        "type": "string",
+                        "description": "Session ID to score"
+                    },
+                    "manifest": {
+                        "type": "object",
+                        "description": "The assessmentManifest object from Server B output. Must include injectedBugIds, expectedSignals, checkpoints, scoringRubric, and skillsMeasured."
+                    },
+                    "finalFiles": {
+                        "type": "object",
+                        "description": "Optional dict of {filepath: content} representing the candidate's final code. If not provided, reconstructed from code snapshots."
+                    }
+                },
+                "required": ["sessionId", "manifest"]
+            }
         )
     ]
 

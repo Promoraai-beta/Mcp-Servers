@@ -2,713 +2,602 @@
 Agent 2: Assessment Generator
 Part of the Promora AI-powered hiring platform
 
-This agent takes structured job data and recommends 2-3 assessment templates
-based on the role, tech stack, and seniority level.
+Analyses job data (role, stack, level, recruiter-selected components) and uses
+an LLM to produce 2-3 specific, rubric-ready assessment tasks.
+
+The tasks are then passed to llm_generator.py in Server B which generates
+the actual project files, intentional bugs, and tests.
 """
 
+import os
 import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Any, Optional
-import re
 
-# Configure logging
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent.parent.parent / '.env'
+    load_dotenv(dotenv_path=env_path if env_path.exists() else None, override=True)
+except ImportError:
+    pass
+
+try:
+    from openai import AzureOpenAI, OpenAI
+except ImportError:
+    AzureOpenAI = None
+    OpenAI = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _make_client():
+    """Return (client, model) using AzureOpenAI if configured, else standard OpenAI."""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
+    if azure_endpoint and AzureOpenAI is not None:
+        client = AzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=azure_endpoint,
+            api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+        )
+        model = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4.1")
+        return client, model
+    if OpenAI is not None:
+        return OpenAI(api_key=api_key), os.environ.get("OPENAI_MODEL", "gpt-4o")
+    return None, None
+
+
+# ── System prompt ─────────────────────────────────────────────────────────────
+_TASK_SYSTEM_PROMPT = """You are a senior engineering manager designing a technical assessment that will be given to a candidate interviewing at a specific company.
+
+The assessment must feel like it comes from that company's REAL codebase — not a tutorial or generic exercise.
+A candidate should look at this and think "this is exactly the kind of work I'd do here."
+
+═══════════════════════════════════════════════
+STEP 1: INFER THE PRODUCT DOMAIN
+═══════════════════════════════════════════════
+Before generating tasks, identify the company's product domain from the company name + job description.
+Then invent a plausible feature or service within that product that the candidate will work on.
+
+Domain examples:
+  Payments/Fintech    → invoice processing, payout reconciliation, fraud detection queue, subscription billing
+  E-commerce          → cart checkout flow, inventory sync, order fulfilment status, return/refund handling
+  SaaS B2B            → team role management, usage-based billing, audit log, webhook delivery system
+  Healthcare          → appointment booking, prescription tracker, patient intake form, lab result viewer
+  Logistics/Supply    → shipment tracking, warehouse pick-list, carrier rate calculator, route optimizer
+  HR/Recruiting       → candidate pipeline, interview scheduling, offer approval workflow, headcount tracker
+  DevTools/Platform   → CI pipeline monitor, feature flag manager, deploy log viewer, alert routing
+  Unknown/generic     → invent the most plausible product from the job description
+
+═══════════════════════════════════════════════
+STEP 2: GENERATE TASKS THAT FEEL REAL
+═══════════════════════════════════════════════
+Each task must:
+- Reference a specific feature of the inferred product (not a generic "form" or "endpoint")
+- Use real-sounding file/component/function names tied to that domain
+- Describe what is broken in terms a developer at that company would understand
+- Have acceptance criteria that reference the actual failing behaviour (not "test passes")
+
+TASK TITLE RULES:
+  BAD  → "Fix State Bug in User Form"
+  BAD  → "Add REST Endpoint for Users"
+  BAD  → "Optimize Slow Database Query"
+  GOOD → "Fix Race Condition in Concurrent Booking Confirmation"
+  GOOD → "Repair Missing DB Commit in Payout Batch Processor"
+  GOOD → "Fix Stale Closure in Live Shipment Tracker Component"
+  GOOD → "Resolve Off-by-One in Paginated Invoice Line Items"
+  GOOD → "Fix Auth Bypass on Bulk Order Status Update Endpoint"
+
+DESCRIPTION RULES:
+- Name the specific component, file, or function that is broken
+- Say what symptom the user sees (not "it doesn't work" — "the payout total shows $0 after approval")
+- Mention the failing test by name if applicable
+
+ACCEPTANCE CRITERIA RULES:
+- Observable and specific: "POST /api/payouts/:id/approve returns 200 and persists the approved_at timestamp"
+- Not: "the endpoint works correctly"
+- Reference the domain: "the candidate pipeline board reflects status change within the same session"
+
+═══════════════════════════════════════════════
+COMPONENT TYPE DEFINITIONS
+═══════════════════════════════════════════════
+Each task must use exactly one component type. Here is what each means:
+
+  ide_project  → A code task inside a real monorepo running in a container.
+                 The candidate finds a specific broken feature and fixes it.
+                 Must name the exact file/component/route, describe the bug symptom,
+                 and reference a failing test by name.
+                 Example: "Fix stale closure in InvoiceDetailsPanel that shows outdated payment status"
+
+  leetcode     → An algorithmic coding problem. Domain context from the JD must be woven in.
+                 Example: "Given a stream of shipment events, find the first carrier with 3+ consecutive delays"
+
+  database     → A SQL schema or query task. Must use domain-specific table/column names.
+                 Example: "Add an index to audit_events and rewrite the slow monthly billing summary query"
+
+  docs         → A design document, RFC, or architecture decision record.
+                 Must be specific to the inferred product domain.
+                 Example: "Write a design doc for migrating the invoice delivery queue from polling to webhooks"
+
+  sheets       → A spreadsheet or data analysis task.
+                 Example: "Write formulas to compute monthly churn from a subscription export CSV"
+
+  design       → A system design or architecture question.
+                 Example: "Design the data model and API for a multi-tenant audit log system"
+
+═══════════════════════════════════════════════
+TASK COUNT — CRITICAL RULE
+═══════════════════════════════════════════════
+Generate EXACTLY one task per selected component type — no more, no less per type.
+EXCEPTION: ide_project may appear 2-3 times if budget allows and seniority is mid/senior.
+
+Examples:
+  ["ide_project"]                       → 2 tasks (easy + hard ide_project). Always generate 2 for ide_project-only.
+  ["ide_project", "docs"]               → 2 tasks: 1 ide_project + 1 docs
+  ["ide_project", "leetcode"]           → 2 tasks: 1 ide_project + 1 leetcode
+  ["ide_project", "database", "docs"]   → 3 tasks: 1 of each
+  ["ide_project", "database"]           → 3 tasks: 2 ide_project (easy + hard) + 1 database
+
+NEVER skip a selected component type.
+
+DIFFICULTY SPREAD:
+When generating multiple tasks, vary the difficulty so candidates who are fast get challenged
+and candidates who are slower still complete something meaningful.
+A good spread makes the assessment readable as a story — warm up, main challenge, stretch goal.
+The specific difficulty of each task should fit the domain and seniority level, not follow
+a fixed formula.
+
+DOCS TASK RULE:
+The docs task must ask for something a developer at that company would actually write —
+not a generic essay. It should be tightly coupled to the product domain:
+  GOOD → "Write a runbook for the payment webhook retry system — cover what happens when
+          the idempotency key expires mid-retry and how the on-call engineer recovers."
+  BAD  → A generic "explain how React state works" or restating the coding task
+The docs task prompt should include a pre-seeded stub in the codebase (a .md file with
+headings already written) so candidates understand the expected structure and depth.
+The stub headings should be domain-specific, not generic ("## Failure Modes" not "## Section 2").
+
+═══════════════════════════════════════════════
+TIME CALIBRATION (be honest)
+═══════════════════════════════════════════════
+  easy   / 15 min = ~20 lines, obvious fix in 1 file
+  easy   / 20 min = ~40 lines, 1-2 files
+  medium / 20 min = ~60 lines, requires understanding the system
+  medium / 25 min = ~100 lines, 2-3 files
+  medium / 30 min = ~150 lines, 3-4 files
+  hard   / 30 min = ~200 lines, architectural judgment required
+  hard   / 40 min = multi-file refactor or non-obvious root cause
+
+Scale difficulty to seniority: Junior = easy/medium, Mid = medium, Senior = medium/hard.
+Total duration must NOT exceed the stated time budget.
+"""
+
+# ── JSON schema for structured outputs ────────────────────────────────────────
+_TASK_JSON_SCHEMA = {
+    "name": "assessment_tasks",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id":                 {"type": "string"},
+                        "title":              {"type": "string"},
+                        "duration":           {"type": "string"},
+                        "difficulty":         {"type": "string", "enum": ["easy", "medium", "hard"]},
+                        "component":          {"type": "string", "enum": ["ide_project", "leetcode", "database", "docs", "sheets", "design"]},
+                        "description":        {"type": "string"},
+                        "acceptanceCriteria": {"type": "array", "items": {"type": "string"}},
+                        "skillsTested":       {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["id", "title", "duration", "difficulty", "component", "description", "acceptanceCriteria", "skillsTested"],
+                    "additionalProperties": False,
+                },
+                "minItems": 1,
+                "maxItems": 6,
+            }
+        },
+        "required": ["tasks"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _build_task_prompt(
+    job_title: str,
+    job_description: str,
+    company: str,
+    role: str,
+    stack: List[str],
+    level: str,
+    components: List[str],
+    time_budget_minutes: int,
+    bug_types: Optional[List[str]] = None,
+) -> str:
+    stack_str  = ", ".join(stack) if stack else "not specified"
+    per_task   = time_budget_minutes // max(len(components), 1)
+    comp_lines = "\n".join(f"  task #{i+1}: component = \"{c}\"" for i, c in enumerate(components))
+
+    bug_hint = ""
+    if bug_types:
+        bug_hint = f"\nBug categories the recruiter wants to test: {', '.join(bug_types)}.\n" \
+                   "When writing ide_project task descriptions, the bugs to fix must draw from these categories.\n"
+
+    return f"""Company: {company}
+Job Title: {job_title}
+Role: {role} | Level: {level}
+Stack: {stack_str}
+Total time budget: {time_budget_minutes} min (~{per_task} min per task)
+{bug_hint}
+Required tasks — generate EXACTLY one task per line, in this order:
+{comp_lines}
+
+Total: {len(components)} task(s). Do not add extras. Do not skip any type.
+
+Job Description:
+{job_description[:3000]}
+
+─── YOUR TASK ────────────────────────────────────────────────
+1. In 1 sentence, state what product this company builds (infer from company name + JD).
+
+2. Invent a specific, partially-broken feature of that product. Use real domain names
+   (e.g. "PayoutBatchProcessor", "ShipmentStatusWebhook", "CandidatePipelineBoard").
+
+3. Generate exactly {len(components)} task(s), one per required component above:
+   - Match the component type exactly as listed
+   - Reference specific files, components, or routes by name
+   - Describe the exact symptom the user sees when the bug/gap is present
+   - Set duration honestly using the time calibration anchors
+   - Write acceptance criteria that are observable and domain-specific
+   - For ide_project tasks: the bugs introduced must align with the bug categories listed above
+
+A candidate at {company} should read this and immediately feel like they are already at work.
+"""
+
+
+# ── LLM task generator ────────────────────────────────────────────────────────
+
+def _generate_tasks_with_llm(
+    job_title: str,
+    job_description: str,
+    company: str,
+    role: str,
+    stack: List[str],
+    level: str,
+    components: List[str],
+    time_budget_minutes: int,
+    bug_types: Optional[List[str]] = None,
+    model: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Use OpenAI structured outputs to generate assessment tasks.
+    Retries once on failure before raising.
+    """
+    client, default_model = _make_client()
+    if not client:
+        raise RuntimeError(
+            "No LLM client available. Set AZURE_OPENAI_ENDPOINT + OPENAI_API_KEY "
+            "(Azure) or OPENAI_API_KEY (standard OpenAI)."
+        )
+
+    chosen_model = model or default_model
+    prompt       = _build_task_prompt(
+        job_title, job_description, company,
+        role, stack, level, components, time_budget_minutes,
+        bug_types=bug_types,
+    )
+    messages = [
+        {"role": "system", "content": _TASK_SYSTEM_PROMPT},
+        {"role": "user",   "content": prompt},
+    ]
+
+    def _call_and_parse(attempt: int) -> List[Dict[str, Any]]:
+        """Single attempt: call API → parse → validate → return task list."""
+        logger.info(f"LLM attempt {attempt} (model={chosen_model})")
+        try:
+            resp = client.chat.completions.create(
+                model=chosen_model,
+                messages=messages,
+                temperature=0.7,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": _TASK_JSON_SCHEMA,
+                },
+                max_tokens=3000,
+            )
+        except Exception as api_err:
+            raise RuntimeError(f"OpenAI API error: {api_err}") from api_err
+
+        content = resp.choices[0].message.content or ""
+        if not content:
+            raise RuntimeError("OpenAI returned an empty response")
+
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as je:
+            raise RuntimeError(f"Failed to parse LLM JSON: {je} | raw={content[:200]}") from je
+
+        tasks = parsed.get("tasks", [])
+        if not tasks:
+            raise RuntimeError("LLM returned zero tasks")
+
+        # Post-validation: reject tasks whose component isn't in the selected set
+        allowed = set(components)
+        filtered = [t for t in tasks if t.get("component") in allowed]
+        if not filtered:
+            raise RuntimeError(
+                f"All generated tasks used disallowed components. "
+                f"Selected: {components}. Got: {[t.get('component') for t in tasks]}"
+            )
+
+        # Post-validation: every selected component must have at least one task
+        covered = {t.get("component") for t in filtered}
+        missing = set(components) - covered
+        if missing:
+            raise RuntimeError(
+                f"Generated tasks missing coverage for component(s): {missing}. "
+                f"Selected: {components}. Got components: {list(covered)}"
+            )
+
+        # Post-validation: total duration must not wildly exceed budget
+        total_min = 0
+        for t in filtered:
+            try:
+                total_min += int(str(t.get("duration", "25")).split()[0])
+            except (ValueError, IndexError):
+                pass
+        if total_min > time_budget_minutes * 1.5:
+            raise RuntimeError(
+                f"Generated tasks total {total_min} min, exceeds budget {time_budget_minutes} min × 1.5"
+            )
+
+        # Return at most len(components) tasks — we've already expanded the list
+        # to match the recruiter's numTasks, so cap = len(components).
+        max_tasks = len(components)
+        logger.info(f"Attempt {attempt}: {len(filtered)} valid tasks, total ~{total_min} min")
+        return filtered[:max_tasks]
+
+    # Try once; on failure retry once with a note, then hard-fail
+    last_err: Optional[Exception] = None
+    for attempt in range(1, 3):  # attempts 1 and 2
+        try:
+            return _call_and_parse(attempt)
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Attempt {attempt} failed: {e}")
+            if attempt == 1:
+                # Add a corrective hint before retry
+                messages.append({"role": "user", "content": f"Previous attempt failed: {e}. Please try again, following the schema strictly."})
+
+    raise RuntimeError(
+        f"Could not generate assessment tasks after 2 attempts. Last error: {last_err}. "
+        "Check OPENAI_API_KEY and model availability."
+    ) from last_err
+
+
+# ── Public entry point ────────────────────────────────────────────────────────
+
 def run_agent_2(job_data: dict) -> dict:
     """
-    Run Agent 2: Assessment Generator to recommend assessment templates.
-    
-    This function analyzes job data from Agent 1 and generates 2-3 tailored
-    assessment templates based on simple keyword matching rules.
-    
-    Args:
-        job_data (dict): Structured job data from Agent 1 containing:
-            - jobTitle (str): The job title
-            - company (str): Company name
-            - jobDescription (str): Full job description text
-            
-    Returns:
-        dict: Assessment recommendations containing:
-            - suggestedAssessments (list): 2-3 recommended assessment templates
-            - role (str): Detected role category
-            - stack (list): Extracted technologies
-            - level (str): Inferred seniority level
-            
-    Example:
-        >>> job_data = {
-        ...     "jobTitle": "Senior Python Developer",
-        ...     "company": "TechCorp",
-        ...     "jobDescription": "We need a senior Python developer with Django, React, and AWS experience..."
-        ... }
-        >>> result = run_agent_2(job_data)
-        >>> print(result["suggestedAssessments"])
-        [
-            {
-                "title": "Python + Django Challenge",
-                "duration": "60 min",
-                "components": ["API Development", "Database Design", "Testing"]
-            }
-        ]
+    Analyse job data and return LLM-generated assessment tasks + project metadata.
+
+    job_data shape:
+      jobTitle: str
+      company: str (optional)
+      jobDescription: str
+      assessmentPreferences:
+        components: list[str]   e.g. ["ide_project", "database", "docs"]
+        ideLanguage: str        e.g. "typescript"
+        timeLimitMinutes: int   total assessment time (default 60)
     """
     try:
         logger.info("Starting Agent 2: Assessment Generator")
-        
-        # Validate input data
+
         if not _is_valid_job_data(job_data):
-            logger.warning("Invalid job data provided")
+            logger.warning("Invalid job data")
             return {"suggestedAssessments": []}
-        
-        # Parse job information using simple keyword matching
-        logger.info("Parsing job data...")
-        role = _parse_role(job_data)
+
+        job_title   = job_data.get("jobTitle", "")
+        company     = job_data.get("company", "")
+        job_desc    = job_data.get("jobDescription", "")
+
+        role  = _parse_role(job_data)
         stack = _parse_stack(job_data)
         level = _parse_level(job_data)
-        
-        logger.info(f"Detected: {role} role, {level} level, stack: {', '.join(stack)}")
-        
-        # Generate assessments using predefined mappings
-        logger.info("Generating assessments using predefined rules...")
-        suggested_assessments = _generate_suggested_assessments(role, stack, level)
-        
-        # Generate full template specification with task-specific files
-        logger.info("Generating template specification with task files...")
-        template_spec = _generate_template_spec(role, stack, level, suggested_assessments)
-        
-        result = {
-            "suggestedAssessments": suggested_assessments,
-            "role": role,
-            "stack": stack,
-            "level": level,
-            "templateSpec": template_spec  # Add full template spec
+
+        prefs        = job_data.get("assessmentPreferences") or {}
+        components   = prefs.get("components") or ["ide_project", "docs"]
+        ide_language = prefs.get("ideLanguage", "typescript")
+        time_budget  = int(prefs.get("timeLimitMinutes", 60))
+        num_tasks    = prefs.get("numTasks")
+        bug_types    = prefs.get("bugTypes") or []
+        recruiter_skills = prefs.get("skills") or []
+
+        # Merge recruiter-selected skills into the auto-detected stack.
+        # Recruiter selections win — put them first, then append any auto-detected
+        # items not already present (case-insensitive dedup).
+        if recruiter_skills:
+            merged = list(recruiter_skills)
+            lower_merged = {s.lower() for s in merged}
+            for s in stack:
+                if s.lower() not in lower_merged:
+                    merged.append(s)
+                    lower_merged.add(s.lower())
+            stack = merged
+
+        # Expand the component list to match numTasks if recruiter asked for more
+        # tasks than there are unique component types. Extra tasks are always
+        # ide_project (the most natural "extra challenge" type).
+        if num_tasks and num_tasks > len(components):
+            extra = num_tasks - len(components)
+            components = components + ["ide_project"] * extra
+
+        logger.info(
+            f"role={role}, level={level}, stack={stack}, components={components}, "
+            f"budget={time_budget}min, numTasks={num_tasks}, bugTypes={bug_types}"
+        )
+
+        # Always AI-generated — raises RuntimeError if LLM is unavailable
+        tasks = _generate_tasks_with_llm(
+            job_title=job_title,
+            job_description=job_desc,
+            company=company,
+            role=role,
+            stack=stack,
+            level=level,
+            components=components,
+            time_budget_minutes=time_budget,
+            bug_types=bug_types if bug_types else None,
+        )
+
+        template_spec = _generate_template_metadata(stack, components, ide_language)
+
+        _ROLE_TO_ASSESSMENT_TYPE = {
+            "Frontend":   "frontend_fluency",
+            "Backend":    "backend_fluency",
+            "Data":       "analyst_fluency",
+            "Full-Stack": "generic",
+            "General":    "generic",
         }
-        
-        logger.info(f"Agent 2 completed successfully. Generated {len(suggested_assessments)} assessments and template spec")
+
+        result = {
+            "suggestedAssessments": tasks,
+            "role":           role,
+            "stack":          stack,
+            "level":          level,
+            "components":     components,
+            "ideLanguage":    ide_language,
+            "timeBudget":     time_budget,
+            "numTasks":       len(tasks),
+            "bugTypes":       bug_types,
+            "templateSpec":   template_spec,
+            "assessmentType": _ROLE_TO_ASSESSMENT_TYPE.get(role, "generic"),
+        }
+        logger.info(f"Agent 2 complete — {len(tasks)} tasks generated")
         return result
-        
+
     except Exception as e:
-        logger.error(f"Error in Agent 2: {str(e)}")
+        logger.error(f"Error in Agent 2: {e}")
         return {"suggestedAssessments": []}
 
 
+# ── Validation ────────────────────────────────────────────────────────────────
+
 def _is_valid_job_data(job_data: dict) -> bool:
-    """
-    Validate that job data contains required fields.
-    
-    Args:
-        job_data (dict): Job data to validate
-        
-    Returns:
-        bool: True if valid, False otherwise
-    """
     if not isinstance(job_data, dict):
         return False
-    
-    required_fields = ["jobTitle", "company", "jobDescription"]
-    return all(field in job_data for field in required_fields)
+    # company is optional; jobTitle + jobDescription required
+    return bool(job_data.get("jobTitle")) and bool(job_data.get("jobDescription"))
 
+
+# ── Parsers — produce signals fed to the LLM prompt ──────────────────────────
 
 def _parse_role(job_data: dict) -> str:
-    """
-    Parse role using simple keyword matching rules.
-    
-    Args:
-        job_data (dict): Job data containing title and description
-        
-    Returns:
-        str: Detected role category
-    """
-    title = job_data.get('jobTitle', '').lower()
-    description = job_data.get('jobDescription', '').lower()
-    text = f"{title} {description}"
-    
-    # Priority 1: Check title first (most reliable indicator)
-    if any(keyword in title for keyword in ["frontend", "front-end", "front end", "ui developer", "ui engineer"]):
+    title = job_data.get("jobTitle", "").lower()
+    desc  = job_data.get("jobDescription", "").lower()
+
+    if any(k in title for k in ("frontend", "front-end", "front end", "ui developer", "ui engineer")):
         return "Frontend"
-    
-    if any(keyword in title for keyword in ["backend", "back-end", "back end", "server", "api engineer"]):
+    if any(k in title for k in ("backend", "back-end", "back end", "server", "api engineer")):
         return "Backend"
-    
-    if any(keyword in title for keyword in ["data", "machine learning", "ml engineer", "ai engineer", "analyst", "scientist"]):
+    if any(k in title for k in ("data", "machine learning", "ml engineer", "ai engineer", "analyst", "scientist")):
         return "Data"
-    
-    if any(keyword in title for keyword in ["full-stack", "fullstack", "full stack"]):
+    if any(k in title for k in ("full-stack", "fullstack", "full stack")):
         return "Full-Stack"
-    
-    # Priority 2: Check description with more specific keywords
-    # Frontend keywords (more specific to avoid false positives)
-    if any(keyword in description for keyword in ["frontend", "front-end", "react", "vue", "angular", "ui/ux", "ui development"]):
+    if any(k in desc for k in ("frontend", "front-end", "react", "vue", "angular")):
         return "Frontend"
-    
-    # Backend keywords (more specific)
-    if any(keyword in description for keyword in ["backend", "back-end", "api development", "server-side", "rest api", "django", "flask", "express"]):
+    if any(k in desc for k in ("backend", "back-end", "api development", "server-side", "django", "flask", "express")):
         return "Backend"
-    
-    # Data keywords
-    if any(keyword in description for keyword in ["data", "machine learning", "ai", "analyst", "scientist"]):
+    if any(k in desc for k in ("machine learning", "data pipeline", "analytics", "pandas", "spark")):
         return "Data"
-    
-    # Full-stack keywords
-    if any(keyword in description for keyword in ["full-stack", "fullstack", "full stack"]):
+    if any(k in desc for k in ("full-stack", "fullstack", "full stack")):
         return "Full-Stack"
-    
-    # Default fallback
     return "General"
 
 
 def _parse_stack(job_data: dict) -> List[str]:
-    """
-    Parse tech stack using simple keyword matching rules.
-    
-    Args:
-        job_data (dict): Job data containing description
-        
-    Returns:
-        List[str]: List of detected technologies
-    """
-    text = job_data.get("jobDescription", "").lower()
+    text  = job_data.get("jobDescription", "").lower()
     stack = []
-    
-    # Rule 1: Programming languages
-    languages = ["python", "javascript", "java", "typescript", "go", "rust", "php", "ruby"]
-    for lang in languages:
-        if lang in text:
-            stack.append(lang.title())
-    
-    # Rule 2: Frontend frameworks
-    frontend = ["react", "vue", "angular", "html", "css"]
-    for tech in frontend:
-        if tech in text:
-            stack.append(tech.title())
-    
-    # Rule 3: Backend frameworks
-    backend = ["django", "flask", "express", "spring", "rails"]
-    for tech in backend:
-        if tech in text:
-            stack.append(tech.title())
-    
-    # Rule 4: Databases
-    databases = ["postgresql", "mysql", "mongodb", "redis", "sql"]
-    for db in databases:
-        if db in text:
-            stack.append(db.title())
-    
-    # Rule 5: Cloud/DevOps
-    cloud = ["aws", "azure", "docker", "kubernetes"]
-    for tech in cloud:
-        if tech in text:
-            stack.append(tech.title())
-    
-    return list(set(stack))  # Remove duplicates
+    checks = [
+        ("Python",     ["python"]),
+        ("JavaScript", ["javascript"]),
+        ("TypeScript", ["typescript"]),
+        ("Java",       ["java "]),
+        ("Go",         [" golang", " go "]),
+        ("Rust",       ["rust"]),
+        ("Ruby",       ["ruby"]),
+        ("React",      ["react"]),
+        ("Vue",        ["vue"]),
+        ("Angular",    ["angular"]),
+        ("Django",     ["django"]),
+        ("Flask",      ["flask"]),
+        ("FastAPI",    ["fastapi"]),
+        ("Express",    ["express"]),
+        ("Spring",     ["spring"]),
+        ("PostgreSQL", ["postgresql", "postgres"]),
+        ("MySQL",      ["mysql"]),
+        ("MongoDB",    ["mongodb", "mongo"]),
+        ("Redis",      ["redis"]),
+        ("SQLite",     ["sqlite"]),
+        ("AWS",        ["aws"]),
+        ("Azure",      ["azure"]),
+        ("Docker",     ["docker"]),
+        ("Kubernetes", ["kubernetes", "k8s"]),
+    ]
+    for name, keywords in checks:
+        if any(k in text for k in keywords):
+            stack.append(name)
+    return list(dict.fromkeys(stack))
 
 
 def _parse_level(job_data: dict) -> str:
-    """
-    Parse seniority level using simple keyword matching rules.
-    
-    Args:
-        job_data (dict): Job data containing title and description
-        
-    Returns:
-        str: Inferred seniority level
-    """
-    text = f"{job_data.get('jobTitle', '')} {job_data.get('jobDescription', '')}".lower()
-    
-    # Rule 1: Intern keywords
-    if any(keyword in text for keyword in ["intern", "internship", "entry level"]):
+    text = f"{job_data.get('jobTitle','')} {job_data.get('jobDescription','')}".lower()
+    if any(k in text for k in ("intern", "internship", "entry level", "entry-level")):
         return "Intern"
-    
-    # Rule 2: Junior keywords
-    if any(keyword in text for keyword in ["junior", "0-2 years", "1-2 years"]):
+    if any(k in text for k in ("junior", "jr.", "0-2 years", "1-2 years")):
         return "Junior"
-    
-    # Rule 3: Senior keywords
-    if any(keyword in text for keyword in ["senior", "lead", "5+ years", "6+ years"]):
-        return "Senior"
-    
-    # Rule 4: Staff/Principal keywords
-    if any(keyword in text for keyword in ["staff", "principal", "8+ years", "10+ years"]):
+    if any(k in text for k in ("staff", "principal", "distinguished", "8+ years", "10+ years")):
         return "Staff"
-    
-    # Default fallback
+    if any(k in text for k in ("senior", "lead", "sr.", "5+ years", "6+ years", "7+ years")):
+        return "Senior"
     return "Mid"
 
 
+# ── Template metadata ─────────────────────────────────────────────────────────
 
-
-def _generate_template_spec(role: str, stack: List[str], level: str, suggested_assessments: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _generate_template_metadata(
+    stack: List[str],
+    components: List[str],
+    ide_language: str,
+) -> Dict[str, Any]:
     """
-    Generate full template specification with dependencies and file structure.
-    
-    Args:
-        role (str): Detected role category
-        stack (List[str]): Extracted technologies
-        level (str): Inferred seniority level
-        
-    Returns:
-        Dict[str, Any]: Full template specification
+    Return lightweight project metadata for Server B.
+    File generation is done by llm_generator.py.
     """
-    # Determine runtime and package manager based on stack
-    runtime = "node:20-alpine"
-    package_manager = "npm"
-    
-    if "Python" in stack:
-        runtime = "python:3.11-slim"
-        package_manager = "pip"
-    elif "Java" in stack:
-        runtime = "openjdk:17-jdk-slim"
-        package_manager = "maven"
-    elif "Go" in stack:
-        runtime = "golang:1.21-alpine"
-        package_manager = "go"
-    
-    # Generate dependencies based on stack
-    dependencies = {}
-    dev_dependencies = {}
-    scripts = {}
-    file_structure = {}
-    
-    # Skip full project templates if we're generating LeetCode-style problems
-    # (LeetCode problems don't need React app structure)
-    generate_full_project = not (suggested_assessments and len(suggested_assessments) > 0)
-    
-    # Frontend/React templates (only if NOT generating LeetCode-style problems)
-    if generate_full_project and (role == "Frontend" or "React" in stack or "Vue" in stack or "Angular" in stack):
-        if "React" in stack or role == "Frontend":
-            dependencies = {
-                "react": "^18.2.0",
-                "react-dom": "^18.2.0"
-            }
-            if "Typescript" in stack:
-                dependencies["typescript"] = "^5.3.0"
-                dev_dependencies = {
-                    "@types/react": "^18.2.0",
-                    "@types/react-dom": "^18.2.0",
-                    "@types/node": "^20.10.0",
-                    "vite": "^5.0.0",
-                    "@vitejs/plugin-react": "^4.2.0"
-                }
-                scripts = {
-                    "dev": "vite",
-                    "build": "tsc && vite build",
-                    "preview": "vite preview"
-                }
-                file_structure = {
-                    "src/App.tsx": "// React + TypeScript starter code\nimport React from 'react';\n\nfunction App() {\n  return (\n    <div className=\"App\">\n      <h1>Assessment Project</h1>\n      {/* Your code here */}\n    </div>\n  );\n}\n\nexport default App;",
-                    "src/main.tsx": "import React from 'react';\nimport ReactDOM from 'react-dom/client';\nimport App from './App';\n\nReactDOM.createRoot(document.getElementById('root')!).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>\n);",
-                    "src/index.css": "body { margin: 0; font-family: sans-serif; }",
-                    "index.html": "<!DOCTYPE html>\n<html>\n<head><title>Assessment</title></head>\n<body><div id=\"root\"></div></body>\n</html>",
-                    "tsconfig.json": '{\n  "compilerOptions": {\n    "target": "ES2020",\n    "useDefineForClassFields": true,\n    "lib": ["ES2020", "DOM", "DOM.Iterable"],\n    "module": "ESNext",\n    "skipLibCheck": true,\n    "moduleResolution": "bundler",\n    "allowImportingTsExtensions": true,\n    "resolveJsonModule": true,\n    "isolatedModules": true,\n    "noEmit": true,\n    "jsx": "react-jsx",\n    "strict": true,\n    "noUnusedLocals": true,\n    "noUnusedParameters": true,\n    "noFallthroughCasesInSwitch": true\n  },\n  "include": ["src"]\n}',
-                    "vite.config.ts": "import { defineConfig } from 'vite';\nimport react from '@vitejs/plugin-react';\n\nexport default defineConfig({\n  plugins: [react()],\n});"
-                }
-            else:
-                dev_dependencies = {
-                    "vite": "^5.0.0",
-                    "@vitejs/plugin-react": "^4.2.0"
-                }
-                scripts = {
-                    "dev": "vite",
-                    "build": "vite build",
-                    "preview": "vite preview"
-                }
-                file_structure = {
-                    "src/App.jsx": "import React from 'react';\n\nfunction App() {\n  return (\n    <div className=\"App\">\n      <h1>Assessment Project</h1>\n      {/* Your code here */}\n    </div>\n  );\n}\n\nexport default App;",
-                    "src/main.jsx": "import React from 'react';\nimport ReactDOM from 'react-dom/client';\nimport App from './App';\n\nReactDOM.createRoot(document.getElementById('root')).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>\n);",
-                    "index.html": "<!DOCTYPE html>\n<html>\n<head><title>Assessment</title></head>\n<body><div id=\"root\"></div></body>\n</html>",
-                    "vite.config.js": "import { defineConfig } from 'vite';\nimport react from '@vitejs/plugin-react';\n\nexport default defineConfig({\n  plugins: [react()],\n});"
-                }
-    
-    # Backend/Python templates (only if NOT generating LeetCode-style problems)
-    elif generate_full_project and (role == "Backend" or "Python" in stack):
-        if "Django" in stack:
-            dependencies = {
-                "django": "^4.2.0",
-                "djangorestframework": "^3.14.0"
-            }
-            scripts = {
-                "dev": "python manage.py runserver",
-                "migrate": "python manage.py migrate"
-            }
-            file_structure = {
-                "manage.py": "# Django manage.py",
-                "requirements.txt": "django==4.2.0\ndjangorestframework==3.14.0",
-                "app/settings.py": "# Django settings",
-                "app/urls.py": "# URL configuration"
-            }
-        elif "Flask" in stack:
-            dependencies = {
-                "flask": "^3.0.0",
-                "flask-restful": "^0.3.10"
-            }
-            scripts = {
-                "dev": "python app.py"
-            }
-            file_structure = {
-                "app.py": "from flask import Flask\n\napp = Flask(__name__)\n\n@app.route('/')\ndef hello():\n    return 'Assessment Project'\n\nif __name__ == '__main__':\n    app.run(debug=True)",
-                "requirements.txt": "flask==3.0.0\nflask-restful==0.3.10"
-            }
+    has_python = any(t in stack for t in ("Python", "Django", "Flask", "FastAPI"))
+    has_java   = "Java" in stack
+    has_go     = "Go" in stack
+
+    if "ide_project" in components or "database" in components:
+        if has_python:
+            runtime, pkg_mgr = "python:3.11-slim", "pip"
+        elif has_java:
+            runtime, pkg_mgr = "openjdk:17-jdk-slim", "maven"
+        elif has_go:
+            runtime, pkg_mgr = "golang:1.21-alpine", "go"
         else:
-            # Generic Python
-            dependencies = {}
-            scripts = {
-                "dev": "python main.py"
-            }
-            file_structure = {
-                "main.py": "# Python assessment project\n# Your code here",
-                "requirements.txt": "# Add your dependencies here"
-            }
-    
-    # Full-Stack templates (only if NOT generating LeetCode-style problems)
-    elif generate_full_project and role == "Full-Stack":
-        # Combine frontend and backend
-        dependencies = {
-            "react": "^18.2.0",
-            "react-dom": "^18.2.0",
-            "express": "^4.18.0"
-        }
-        dev_dependencies = {
-            "vite": "^5.0.0",
-            "@vitejs/plugin-react": "^4.2.0"
-        }
-        scripts = {
-            "dev": "vite",
-            "server": "node server.js",
-            "build": "vite build"
-        }
-        file_structure = {
-            "src/App.jsx": "import React from 'react';\n\nfunction App() {\n  return <div>Full-Stack Assessment</div>;\n}\n\nexport default App;",
-            "server.js": "const express = require('express');\nconst app = express();\n\napp.get('/api/health', (req, res) => {\n  res.json({ status: 'ok' });\n});\n\napp.listen(3000, () => console.log('Server running on port 3000'));"
-        }
-    
-    # Generate task-specific files for LeetCode-style problems
-    # If suggested_assessments provided, create individual problem files
-    if suggested_assessments and len(suggested_assessments) > 0:
-        tasks_dir = "problems"
-        
-        # Determine language based on stack
-        if "Python" in stack:
-            lang_ext = "py"
-            test_runner = "python"
-        elif "Java" in stack:
-            lang_ext = "java"
-            test_runner = "javac"
-        elif "Typescript" in stack or "TypeScript" in stack:
-            lang_ext = "ts"
-            test_runner = "ts-node"
-        else:
-            lang_ext = "js"
-            test_runner = "node"
-        
-        # Create main README with all problems listed
-        readme_content = "# Assessment Problems\n\n"
-        readme_content += f"Solve each problem in the `{tasks_dir}/` directory.\n\n"
-        readme_content += "## Problems:\n\n"
-        for idx, assessment in enumerate(suggested_assessments, 1):
-            task_id = f"task_{idx}"
-            task_title = assessment.get("title", f"Problem {idx}")
-            duration = assessment.get("duration", "Not specified")
-            components = assessment.get("components", [])
-            readme_content += f"### Problem {idx}: {task_title}\n"
-            readme_content += f"- **Duration:** {duration}\n"
-            readme_content += f"- **File:** `{tasks_dir}/{task_id}.{lang_ext}`\n"
-            readme_content += f"- **Test File:** `{tasks_dir}/{task_id}.test.{lang_ext}`\n"
-            if components:
-                readme_content += f"- **Requirements:**\n"
-                for comp in components:
-                    readme_content += f"  - {comp}\n"
-            readme_content += "\n"
-        
-        readme_content += "## How to Solve:\n\n"
-        readme_content += "1. Open each problem file in the `problems/` directory\n"
-        readme_content += "2. Implement your solution in the provided function\n"
-        readme_content += "3. Run tests using: `npm test` or `npm run test`\n"
-        readme_content += "4. Submit your solution when ready\n\n"
-        
-        file_structure[f"{tasks_dir}/README.md"] = readme_content
-        
-        # Create problem files for each task
-        for idx, assessment in enumerate(suggested_assessments, 1):
-            task_id = f"task_{idx}"
-            task_title = assessment.get("title", f"Problem {idx}")
-            components = assessment.get("components", [])
-            
-            # Create problem file with starter code
-            problem_file = f"{tasks_dir}/{task_id}.{lang_ext}"
-            if lang_ext == "py":
-                starter_code = f"""# Problem {idx}: {task_title}
-# Duration: {assessment.get('duration', 'Not specified')}
-
-# TODO: Implement the solution
-# Requirements:
-"""
-                for comp in components:
-                    starter_code += f"# - {comp}\n"
-                starter_code += "\n# Your solution here:\n"
-                starter_code += "def solution():\n    \"\"\"\n    Implement your solution here.\n    \"\"\"\n    pass\n"
-                starter_code += "\n# Example usage:\n# result = solution()\n"
-            elif lang_ext == "js" or lang_ext == "ts":
-                starter_code = f"""// Problem {idx}: {task_title}
-// Duration: {assessment.get('duration', 'Not specified')}
-
-// TODO: Implement the solution
-// Requirements:
-"""
-                for comp in components:
-                    starter_code += f"// - {comp}\n"
-                starter_code += "\n// Your solution here:\n"
-                if lang_ext == "ts":
-                    starter_code += "function solution(): any {\n    // Your code here\n    return null;\n}\n\nexport default solution;\n"
-                else:
-                    starter_code += "function solution() {\n    // Your code here\n    return null;\n}\n\nexport default solution;\n"
-                starter_code += "\n// Example usage:\n// const result = solution();\n"
-            elif lang_ext == "java":
-                starter_code = f"""// Problem {idx}: {task_title}
-// Duration: {assessment.get('duration', 'Not specified')}
-
-// TODO: Implement the solution
-// Requirements:
-"""
-                for comp in components:
-                    starter_code += f"// - {comp}\n"
-                starter_code += "\npublic class Solution {\n    public Object solution() {\n        // Your code here\n        return null;\n    }\n}\n"
-            
-            file_structure[problem_file] = starter_code
-            
-            # Create test file
-            test_file = f"{tasks_dir}/{task_id}.test.{lang_ext}"
-            if lang_ext == "py":
-                test_code = f"""import pytest
-from {task_id} import solution
-
-def test_solution():
-    # TODO: Add visible test cases
-    # These tests will be shown to the candidate
-    result = solution()
-    assert result is not None
-    # Add more test cases here
-"""
-            elif lang_ext == "js" or lang_ext == "ts":
-                test_code = f"""import solution from './{task_id}';
-
-describe('Problem {idx}: {task_title}', () => {{
-    test('should solve the problem', () => {{
-        // TODO: Add visible test cases
-        // These tests will be shown to the candidate
-        const result = solution();
-        expect(result).toBeDefined();
-        // Add more test cases here
-    }});
-}});
-"""
-            file_structure[test_file] = test_code
-        
-        # Add test runner script and dependencies
-        if lang_ext == "py":
-            scripts["test"] = "pytest problems/"
-            if "pytest" not in str(dependencies):
-                if not dependencies:
-                    dependencies = {}
-                dependencies["pytest"] = "^7.4.0"
-        elif lang_ext == "js":
-            scripts["test"] = "jest problems/"
-            if "jest" not in str(dev_dependencies):
-                if not dev_dependencies:
-                    dev_dependencies = {}
-                dev_dependencies["jest"] = "^29.0.0"
-        elif lang_ext == "ts":
-            scripts["test"] = "jest problems/"
-            if "jest" not in str(dev_dependencies):
-                if not dev_dependencies:
-                    dev_dependencies = {}
-                dev_dependencies["jest"] = "^29.0.0"
-                dev_dependencies["@types/jest"] = "^29.0.0"
-                dev_dependencies["ts-jest"] = "^29.0.0"
-    
-    # Default fallback
-    if not file_structure:
-        file_structure = {
-            "README.md": "# Assessment Project\n\nYour assessment tasks here.",
-            "package.json": "{}"
-        }
-    
-    # Fix runtime and packageManager based on actual file structure
-    # Check if we have LeetCode-style problems (problems/ directory)
-    has_problems_dir = any("problems/" in k for k in file_structure.keys())
-    has_react_files = any("react" in str(v).lower() or ".tsx" in k or ".jsx" in k for k, v in file_structure.items())
-    has_python_files = any(".py" in k for k in file_structure.keys())
-    has_java_files = any(".java" in k for k in file_structure.keys())
-    has_js_ts_files = any(".js" in k or ".ts" in k for k in file_structure.keys())
-    
-    # For LeetCode-style problems, use WebContainer (browser runtime)
-    if has_problems_dir:
-        # LeetCode-style problems - always use WebContainer
-        runtime = "browser"  # WebContainer runtime
-        package_manager = "npm"
-        # Ensure package.json exists for WebContainer
-        if "package.json" not in file_structure:
-            import json
-            package_json = {
-                "name": "assessment-problems",
-                "version": "1.0.0",
-                "type": "module" if has_js_ts_files else "commonjs",
-                "scripts": scripts,
-                "dependencies": dependencies,
-                "devDependencies": dev_dependencies
-            }
-            file_structure["package.json"] = json.dumps(package_json, indent=2)
-    elif has_react_files or (has_js_ts_files and not has_python_files and not has_java_files):
-        # Frontend/Node.js - use WebContainer (browser runtime)
-        runtime = "browser"  # Use browser for WebContainer
-        package_manager = "npm"
-    elif has_python_files:
-        runtime = "python:3.11-slim"
-        package_manager = "pip"
-    elif has_java_files:
-        runtime = "openjdk:17-jdk-slim"
-        package_manager = "maven"
+            runtime, pkg_mgr = "node:20-alpine", "npm"
     else:
-        # Default to WebContainer for unknown cases
-        runtime = "browser"
-        package_manager = "npm"
-    
-    # Generate template name
-    stack_name = "-".join(stack[:2]).lower() if stack else "general"
-    template_name = f"{role.lower()}-{stack_name}-{level.lower()}".replace(" ", "-")
-    
+        # LeetCode / docs — browser-based, no container needed
+        runtime, pkg_mgr = "browser", "npm"
+
     return {
-        "name": template_name,
-        "runtime": runtime,
-        "packageManager": package_manager,
-        "dependencies": dependencies,
-        "devDependencies": dev_dependencies,
-        "scripts": scripts,
-        "fileStructure": file_structure
+        "runtime":        runtime,
+        "packageManager": pkg_mgr,
+        "ideLanguage":    ide_language,
     }
-
-
-def _generate_suggested_assessments(role: str, stack: List[str], level: str) -> List[Dict[str, Any]]:
-    """
-    Generate suggested assessments using predefined mappings and simple rules.
-    
-    Args:
-        role (str): Detected role category
-        stack (List[str]): Extracted technologies
-        level (str): Inferred seniority level
-        
-    Returns:
-        List[Dict[str, Any]]: List of assessment templates
-    """
-    assessments = []
-    
-    # Predefined mapping 1: Role-based assessments
-    role_mappings = {
-        "Frontend": [
-            {
-                "title": "React + Debugging Challenge",
-                "duration": "45 min",
-                "components": ["Component Build", "Bug Fixing", "Unit Tests"]
-            },
-            {
-                "title": "UI/UX Implementation",
-                "duration": "30 min", 
-                "components": ["Design to Code", "Responsive Layout", "User Interaction"]
-            }
-        ],
-        "Backend": [
-            {
-                "title": "API Development Challenge",
-                "duration": "60 min",
-                "components": ["REST API", "Database Design", "Error Handling"]
-            },
-            {
-                "title": "System Design Lite",
-                "duration": "30 min",
-                "components": ["Basic Architecture", "API Flow", "State Management"]
-            }
-        ],
-        "Data": [
-            {
-                "title": "Data Analysis Challenge",
-                "duration": "45 min",
-                "components": ["Data Processing", "Visualization", "Insights"]
-            },
-            {
-                "title": "ML Model Building",
-                "duration": "60 min",
-                "components": ["Data Prep", "Model Training", "Evaluation"]
-            }
-        ],
-        "Full-Stack": [
-            {
-                "title": "Full-Stack App Challenge",
-                "duration": "90 min",
-                "components": ["Frontend", "Backend", "Database Integration"]
-            },
-            {
-                "title": "System Design Lite",
-                "duration": "30 min",
-                "components": ["Basic Architecture", "API Flow", "State Management"]
-            }
-        ]
-    }
-    
-    # Predefined mapping 2: Stack-based assessments
-    stack_mappings = {
-        "Python": {
-            "title": "Python + Django Challenge",
-            "duration": "60 min",
-            "components": ["API Development", "Database Design", "Testing"]
-        },
-        "React": {
-            "title": "React + State Management",
-            "duration": "45 min",
-            "components": ["Component Design", "State Management", "API Integration"]
-        },
-        "Javascript": {
-            "title": "JavaScript Fundamentals",
-            "duration": "30 min",
-            "components": ["ES6+ Features", "Async Programming", "DOM Manipulation"]
-        }
-    }
-    
-    # Predefined mapping 3: Level-based assessments
-    level_mappings = {
-        "Intern": {
-            "title": "Basic Coding Challenge",
-            "duration": "30 min",
-            "components": ["Algorithm Basics", "Code Review", "Documentation"]
-        },
-        "Senior": {
-            "title": "Advanced System Design",
-            "duration": "75 min",
-            "components": ["Architecture", "Scalability", "Performance"]
-        }
-    }
-    
-    # Rule 1: Get role-based assessments
-    if role in role_mappings:
-        assessments.extend(role_mappings[role])
-    
-    # Rule 2: Add stack-based assessment if available
-    for tech in stack:
-        if tech.lower() in stack_mappings:
-            assessments.append(stack_mappings[tech.lower()])
-            break  # Only add one stack-based assessment
-    
-    # Rule 3: Add level-based assessment if available
-    if level in level_mappings:
-        assessments.append(level_mappings[level])
-    
-    # Rule 4: Default assessment if no matches
-    if not assessments:
-        assessments.append({
-            "title": "General Technical Challenge",
-            "duration": "45 min",
-            "components": ["Problem Solving", "Code Quality", "Documentation"]
-        })
-    
-    # Limit to 2-3 assessments
-    return assessments[:3]
-
-

@@ -71,11 +71,31 @@ else
     echo -e "${RED}❌ server-b-template-builder not found${NC}"
 fi
 
-# Start Server C (Monitoring)
+# Start Server C (Monitoring — Python/stdio)
 if [ -d "server-c-monitoring" ]; then
-    start_server "server-c" "server-c-monitoring" "src/server.py"
+    start_server "server-c-monitoring" "server-c-monitoring" "src/server.py"
 else
     echo -e "${RED}❌ server-c-monitoring not found${NC}"
+fi
+
+# Start Server C (Orchestrator — Node.js/HTTP on port 3002)
+if [ -d "server-c-orchestrator" ]; then
+    echo -e "${YELLOW}Starting server-c-orchestrator...${NC}"
+    cd "$SCRIPT_DIR/server-c-orchestrator"
+    if [ ! -d "node_modules" ]; then
+        echo -e "${YELLOW}Installing npm dependencies...${NC}"
+        npm install --silent
+    fi
+    export $(grep -v '^#' .env | xargs) 2>/dev/null || true
+    nohup npx ts-node src/server.ts > "/tmp/mcp-server-c-orchestrator.log" 2>&1 &
+    local pid=$!
+    echo $pid > "/tmp/mcp-server-c-orchestrator.pid"
+    echo -e "${GREEN}✅ server-c-orchestrator started (PID: $pid)${NC}"
+    echo -e "   Logs: /tmp/mcp-server-c-orchestrator.log"
+    cd "$SCRIPT_DIR"
+    sleep 2
+else
+    echo -e "${RED}❌ server-c-orchestrator not found${NC}"
 fi
 
 echo ""
@@ -84,7 +104,10 @@ echo ""
 echo "To view logs:"
 echo "  tail -f /tmp/mcp-server-a.log"
 echo "  tail -f /tmp/mcp-server-b.log"
-echo "  tail -f /tmp/mcp-server-c.log"
+echo "  tail -f /tmp/mcp-server-c-monitoring.log"
+echo "  tail -f /tmp/mcp-server-c-orchestrator.log"
+echo ""
+echo "Server C Orchestrator runs on port 3002 (HTTP REST)."
 echo ""
 echo "To stop all servers:"
 echo "  ./stop-all-servers.sh"
@@ -92,5 +115,6 @@ echo ""
 echo "Or manually:"
 echo "  kill \$(cat /tmp/mcp-server-a.pid)"
 echo "  kill \$(cat /tmp/mcp-server-b.pid)"
-echo "  kill \$(cat /tmp/mcp-server-c.pid)"
+echo "  kill \$(cat /tmp/mcp-server-c-monitoring.pid)"
+echo "  kill \$(cat /tmp/mcp-server-c-orchestrator.pid)"
 

@@ -33,12 +33,14 @@ stop_server() {
 # Stop all servers
 stop_server "server-a"
 stop_server "server-b"
-stop_server "server-c"
+stop_server "server-c-monitoring"
+stop_server "server-c-orchestrator"
 
 # Also try to kill by process name as fallback
 pkill -f "server-a-job-analysis/src/server.py" 2>/dev/null
 pkill -f "server-b-template-builder/src/server.py" 2>/dev/null
 pkill -f "server-c-monitoring/src/server.py" 2>/dev/null
+pkill -f "server-c-orchestrator/src/server.ts" 2>/dev/null
 
 echo ""
 echo -e "${GREEN}✅ Done!${NC}"

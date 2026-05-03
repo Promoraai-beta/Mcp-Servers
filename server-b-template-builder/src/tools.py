@@ -118,19 +118,57 @@ def get_tools() -> list[Tool]:
                         "description": "Complexity level",
                         "default": "medium"
                     },
-                    "useLLM": {
-                        "type": "boolean",
-                        "description": "Use LLM to generate project (overrides env USE_LLM)",
-                        "default": False
+                    "variantIndex": {
+                        "type": "integer",
+                        "description": "Variant index for scenario selection (0-based)",
+                        "default": 0
                     },
-                    "llmModel": {
-                        "type": "string",
-                        "description": "LLM model to use (overrides env OPENAI_MODEL)",
-                        "default": "gpt-4o-mini"
+                    "totalVariants": {
+                        "type": "integer",
+                        "description": "Total number of variants being generated in this batch",
+                        "default": 1
                     }
                 },
                 "required": ["tasks", "techStack"]
             }
-        )
+        ),
+        Tool(
+            name="orchestrate_single_variant",
+            description="OpenAI Agents SDK pipeline: generates one fresh unique code template for a single candidate invite. Runs TemplateBuilderAgent with the job context and returns fileStructure + intentionalIssues.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "jobRole": {"type": "string", "description": "Job role"},
+                    "techStack": {"type": "array", "items": {"type": "string"}, "description": "Tech stack"},
+                    "experienceLevel": {"type": "string", "description": "Experience level", "default": "Mid-level"},
+                    "complexity": {"type": "string", "enum": ["easy", "medium", "hard"], "default": "medium"},
+                    "companyName": {"type": "string", "description": "Company name for domain inference"},
+                    "jobDescription": {"type": "string", "description": "Job description text"},
+                    "tasks": {"type": "array", "items": {"type": "object"}, "description": "Assessment tasks from Server A"},
+                    "validatedDeps": {"type": "object", "description": "Pre-validated dependencies"},
+                    "variantIndex": {"type": "integer", "description": "Variant slot index", "default": 0}
+                },
+                "required": ["jobRole", "techStack"]
+            }
+        ),
+        Tool(
+            name="orchestrate_bulk_variants",
+            description="OpenAI Agents SDK pipeline: generates up to 10 unique code templates in parallel for a bulk invite batch. 500 candidates → ≤10 parallel LLM calls, round-robin assigned. Returns array of variants.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "jobRole": {"type": "string", "description": "Job role"},
+                    "techStack": {"type": "array", "items": {"type": "string"}, "description": "Tech stack"},
+                    "variantCount": {"type": "integer", "description": "Number of unique variants to generate (capped at 10)", "default": 1},
+                    "experienceLevel": {"type": "string", "description": "Experience level", "default": "Mid-level"},
+                    "complexity": {"type": "string", "enum": ["easy", "medium", "hard"], "default": "medium"},
+                    "companyName": {"type": "string", "description": "Company name for domain inference"},
+                    "jobDescription": {"type": "string", "description": "Job description text"},
+                    "tasks": {"type": "array", "items": {"type": "object"}, "description": "Assessment tasks from Server A"},
+                    "validatedDeps": {"type": "object", "description": "Pre-validated dependencies"}
+                },
+                "required": ["jobRole", "techStack"]
+            }
+        ),
     ]
 

@@ -6,8 +6,22 @@ Makes HTTP requests to Node.js backend for database operations.
 import os
 import logging
 from typing import List, Dict, Any, Optional
+from pathlib import Path
 import requests
 from requests.exceptions import RequestException
+
+# Load .env file for production
+try:
+    from dotenv import load_dotenv
+    # Load .env from server directory (parent of src/utils/)
+    env_path = Path(__file__).parent.parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+    else:
+        # Try loading from current directory
+        load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, use system env vars
 
 logger = logging.getLogger(__name__)
 
