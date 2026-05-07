@@ -17,13 +17,28 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+# ── field helpers (Prisma returns camelCase; IDE may send snake_case) ─────────
+
+def _evt(e: Dict) -> str:
+    """Return event type regardless of camelCase vs snake_case."""
+    return e.get("eventType") or e.get("event_type") or ""
+
+def _ts(e: Dict):
+    return e.get("timestamp") or e.get("created_at")
+
+
 def analyze_terminal(interactions: List[Dict]) -> Dict[str, Any]:
     """
     Analyze terminal events to understand test/build/debug behavior.
     """
+    # Accept all terminal event types — frontend may send any of these
+    TERMINAL_EVENT_TYPES = {
+        "command_executed", "terminal_spawned", "terminal_command",
+        "terminal_input", "terminal_output", "shell_command",
+    }
     terminal_events = [
         e for e in interactions
-        if e.get("event_type") in ("command_executed", "terminal_spawned")
+        if _evt(e) in TERMINAL_EVENT_TYPES
     ]
 
     if not terminal_events:
@@ -57,12 +72,12 @@ def _extract_commands(terminal_events: List[Dict]) -> List[Dict[str, Any]]:
     for event in terminal_events:
         meta = _parse_metadata(event.get("metadata"))
         cmd = meta.get("command", "")
-        if not cmd and event.get("event_type") == "terminal_spawned":
+        if not cmd and _evt(event) == "terminal_spawned":
             cmd = "[terminal opened]"
 
         commands.append({
             "command": cmd,
-            "timestamp": event.get("timestamp", ""),
+            "timestamp": _ts(event) or "",
             "category": _categorize_command(cmd),
             "exitCode": meta.get("exitCode"),
             "output": (meta.get("output", "") or "")[:500],  # cap output
@@ -123,8 +138,8 @@ def _analyze_test_behavior(
         # Count code modifications before this test run
         mods_before = sum(
             1 for e in all_interactions
-            if e.get("event_type") == "code_modified"
-            and e.get("timestamp", "") < run["timestamp"]
+            if _evt(e) == "code_modified"
+            and (_ts(e) or "") < run["timestamp"]
         )
         test_timeline.append({
             "timestamp": run["timestamp"],
@@ -136,8 +151,8 @@ def _analyze_test_behavior(
     first_test_ts = test_runs[0]["timestamp"] if test_runs else ""
     first_code_change = None
     for e in all_interactions:
-        if e.get("event_type") in ("code_modified", "code_pasted_from_ai"):
-            first_code_change = e.get("timestamp", "")
+        if _evt(e) in ("code_modified", "code_pasted_from_ai", "code_applied"):
+            first_code_change = _ts(e) or ""
             break
 
     ran_tests_first = bool(
@@ -147,8 +162,8 @@ def _analyze_test_behavior(
     # Did they run tests AFTER making changes? (most recent test is after most recent change)
     last_code_change = None
     for e in reversed(all_interactions):
-        if e.get("event_type") in ("code_modified", "code_pasted_from_ai"):
-            last_code_change = e.get("timestamp", "")
+        if _evt(e) in ("code_modified", "code_pasted_from_ai", "code_applied"):
+            last_code_change = _ts(e) or ""
             break
 
     ran_tests_after = bool(

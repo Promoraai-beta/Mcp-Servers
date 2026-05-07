@@ -35,6 +35,29 @@ from analyzers.bug_narrative import build_bug_narratives
 logger = logging.getLogger(__name__)
 
 
+# ── camelCase / snake_case field helpers ────────────────────────────────────
+def _evt(e):
+    return e.get("eventType") or e.get("event_type", "")
+
+def _prompt_text(e):
+    return e.get("promptText") or e.get("prompt_text", "")
+
+def _response_text(e):
+    return e.get("responseText") or e.get("response_text", "")
+
+def _ts(e):
+    v = e.get("timestamp")
+    if v is None:
+        return None
+    if isinstance(v, str):
+        from datetime import datetime
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    return v
+
+
 async def score_with_manifest(
     session_id: str,
     manifest: Dict[str, Any],
@@ -635,9 +658,9 @@ def _score_checkpoints(
         for s in submissions
     )
     all_text += " " + " ".join(
-        (i.get("prompt_text", "") or "")
+        (_prompt_text(i) or "")
         for i in interactions
-        if i.get("event_type") == "prompt_sent"
+        if _evt(i) == "prompt_sent"
     )
     all_text_lower = all_text.lower()
 

@@ -38,8 +38,16 @@ export async function runJudgeAgent(
   model: string
 ): Promise<JudgeVerdict> {
   // Build a readable brief for the judge
+  const failedAgents = Object.entries(brief.dimensionFindings)
+    .filter(([, f]) => f.failed)
+    .map(([name]) => name);
+
   const dimensionSummary = Object.entries(brief.dimensionFindings)
-    .map(([name, f]) => `${name}: ${f.score}/100 (confidence: ${f.confidence.toFixed(2)})\n  ${f.summary}`)
+    .map(([name, f]) =>
+      f.failed
+        ? `${name}: UNAVAILABLE (agent error — exclude from scoring)`
+        : `${name}: ${f.score}/100 (confidence: ${f.confidence.toFixed(2)})\n  ${f.summary}`
+    )
     .join('\n\n');
 
   const conflictSummary =
@@ -52,11 +60,19 @@ export async function runJudgeAgent(
     .map((s) => `#${s.rank} [${s.dimension}] ${s.signal}`)
     .join('\n');
 
+  const videoSection = brief.videoAnalysis
+    ? `\n=== VIDEO ANALYSIS ===\nRisk: ${brief.videoAnalysis.overallRisk}\nVerdict: ${brief.videoAnalysis.verdict}\nFlags: ${brief.videoAnalysis.suspiciousActivities.join(', ') || 'none'}\n`
+    : '';
+
+  const failedNote = failedAgents.length > 0
+    ? `\nNote: some dimension scores may be marked as unavailable due to analysis errors (${failedAgents.join(', ')}). Do not penalize the candidate for missing data — adjust your confidence accordingly.\n`
+    : '';
+
   const userPrompt = `
 === ASSESSMENT BRIEF ===
 Candidate: ${brief.candidateName ?? 'Unknown'}
 Data Quality: ${(brief.overallDataQuality * 100).toFixed(0)}%
-
+${failedNote}
 === DIMENSION FINDINGS ===
 ${dimensionSummary}
 
@@ -68,7 +84,7 @@ ${topSignals || 'None ranked'}
 
 === TIMELINE SUMMARY ===
 ${brief.timelineSummary.map((s) => `${s.label}: ${s.keyEvents.join(', ') || 'quiet'}`).join('\n')}
-
+${videoSection}
 Based on this brief, make your final verdict.
 Explain how you resolved any conflicts.
 Return as JSON.`;
@@ -81,7 +97,7 @@ Return as JSON.`;
     ],
     response_format: { type: 'json_object' },
     temperature: 0.2,
-    max_tokens: 1500,
+    max_tokens: 3000,
   });
 
   const raw = JSON.parse(response.choices[0].message.content ?? '{}');

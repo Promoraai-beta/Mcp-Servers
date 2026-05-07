@@ -33,6 +33,35 @@ def _ts(interaction: Dict):
     """Return timestamp value."""
     return interaction.get("timestamp") or interaction.get("created_at")
 
+# Platform greeting/init messages should never count as candidate prompts.
+_GREETING_PREFIXES = (
+    "you are opening a new ai chat",
+    "you are an ai assistant embedded",
+)
+
+def _is_greeting(interaction: Dict) -> bool:
+    text = _prompt_text(interaction).strip().lower()
+    return any(text.startswith(p) for p in _GREETING_PREFIXES)
+
+def _is_real_prompt(interaction: Dict) -> bool:
+    """True only for genuine candidate-authored prompts (not platform init messages)."""
+    return _evt(interaction) == "prompt_sent" and not _is_greeting(interaction)
+
+
+# ── confidence helper ─────────────────────────────────────────────────────────
+
+def _compute_confidence(n_events: int, n_prompts: int) -> int:
+    """Return confidence score based on data richness."""
+    # More data = more confidence
+    if n_events == 0 and n_prompts == 0:
+        return 30  # no data
+    elif n_events < 5 or n_prompts == 0:
+        return 50  # very little data
+    elif n_events < 20:
+        return 65  # moderate data
+    else:
+        return 80  # sufficient data
+
 
 # ── main entry point ──────────────────────────────────────────────────────────
 
@@ -73,7 +102,7 @@ async def execute_analysis(session_id: str, code: Optional[str] = None) -> Dict[
             "codeIntegration": code_integration,
             "behaviorScore": behavior_score,
             "skills": skills,
-            "confidence": 75,
+            "confidence": _compute_confidence(len(interactions), len([i for i in interactions if _is_real_prompt(i)])),
             "explanation": "Code analysis completed",
             "analysisExplanation": _build_explanation(interactions, behavior_score),
         }
@@ -105,7 +134,7 @@ def _calculate_behavior_score(interactions: List[Dict]) -> int:
     if not interactions:
         return 50  # no data, neutral
 
-    prompts       = [i for i in interactions if _evt(i) == "prompt_sent"]
+    prompts       = [i for i in interactions if _is_real_prompt(i)]
     responses     = [i for i in interactions if _evt(i) == "response_received"]
     copies        = [i for i in interactions if _evt(i) in ("copy", "code_copied_from_ai", "code_copied")]
     applies       = [i for i in interactions if _evt(i) in ("apply", "code_applied", "code_applied_from_ai")]
@@ -125,22 +154,45 @@ def _calculate_behavior_score(interactions: List[Dict]) -> int:
     if n_prompts == 0:
         return 70  # no AI used; assume independent work, moderate score
 
+    # --- Data-gap guard: prompts sent but no action events at all ---
+    # If the candidate sent prompts but we recorded zero copies/applies/mods
+    # it almost certainly means file-change tracking was not running (e.g. old
+    # session before the polling fix).  Penalising them to 25 in this case is
+    # misleading, so we return a neutral 55 with reduced confidence instead.
+    if n_mods == 0 and n_copies == 0 and n_applies == 0:
+        # Small-prompt sessions (≤ 3 prompts) with no action data → neutral
+        if n_prompts <= 3:
+            logger.info(
+                "Agent 7: no action events with ≤3 prompts — likely tracking gap, returning neutral 55"
+            )
+            return 55
+        # Larger prompt volumes with no actions → penalise moderately (not harshly)
+        logger.info(
+            "Agent 7: many prompts but no action events — possible tracking gap, capping penalty at 40"
+        )
+        return 40
+
     # --- Modification ratio: how much did candidate edit vs just prompt? ---
-    # applies + mods = total "deliberate acceptance or editing"
-    deliberate = n_applies + n_mods
-    mod_ratio  = deliberate / n_prompts  # >1 = edited more than prompted
+    # Quality metric: reward edits AFTER AI responses, not just raw volume
+    # applies = direct paste/apply of AI code (lower quality)
+    # mods = manual edits made to AI-generated code (higher quality, shows understanding)
+    # prompts = total prompts sent (denominator)
+    # Weight manual modifications 3x more than blind applies
+    weighted_actions = (n_mods * 3 + n_applies)
+    max_possible = n_prompts * 4  # if candidate modified everything
+    mod_ratio = min(1.0, weighted_actions / max(max_possible, 1))
 
     # --- Copy-without-edit ratio: raw paste without applying ---
     copy_ratio = n_copies / n_prompts  # high = lots of blind copy-paste
 
-    # Base score from modification ratio (0–80 range)
-    if mod_ratio >= 3.0:
+    # Base score from modification ratio (0–80 range, ratio is now 0.0–1.0)
+    if mod_ratio >= 0.75:
         base = 80
-    elif mod_ratio >= 2.0:
+    elif mod_ratio >= 0.50:
         base = 70
-    elif mod_ratio >= 1.0:
+    elif mod_ratio >= 0.25:
         base = 55
-    elif mod_ratio >= 0.5:
+    elif mod_ratio >= 0.125:
         base = 40
     else:
         base = 25  # very few modifications relative to prompts
@@ -162,7 +214,7 @@ def _calculate_behavior_score(interactions: List[Dict]) -> int:
 
 def _build_explanation(interactions: List[Dict], score: int) -> str:
     """Build a human-readable explanation of the behavior score."""
-    prompts   = [i for i in interactions if _evt(i) == "prompt_sent"]
+    prompts   = [i for i in interactions if _is_real_prompt(i)]
     copies    = [i for i in interactions if _evt(i) in ("copy", "code_copied_from_ai", "code_copied")]
     applies   = [i for i in interactions if _evt(i) in ("apply", "code_applied", "code_applied_from_ai")]
     mods      = [i for i in interactions if _evt(i) == "code_modified"]
@@ -174,8 +226,21 @@ def _build_explanation(interactions: List[Dict], score: int) -> str:
 
     parts = [f"Candidate sent {n_p} prompt{'s' if n_p != 1 else ''} to the AI."]
 
+    # Tracking-gap case: prompts present but no action events recorded
+    if n_c == 0 and n_a == 0 and n_m == 0:
+        parts.append("No copy, apply, or code-modification events were recorded —"
+                     " file-change tracking may not have been active for this session.")
+        if score >= 55:
+            parts.append("Score is neutral due to insufficient action-event data.")
+        else:
+            parts.append("Score is penalised moderately due to high prompt volume with no recorded actions.")
+        return " ".join(parts)
+
     if n_c > 0:
-        parts.append(f"Modified {n_c == 0 and '0' or n_c}% of AI-generated code" +
+        # Compute modification rate as percentage of AI copy/apply events that were manually edited
+        total_ai_events = n_c + n_a  # copies + applies
+        mod_pct = round((n_m / max(total_ai_events, 1)) * 100)
+        parts.append(f"Modified {mod_pct}% of AI suggestions" +
                      (" and made few critical-review prompts." if n_c > n_p // 2 else "."))
     if n_a > 0:
         parts.append(f"Applied {n_a} AI suggestion{'s' if n_a != 1 else ''} directly.")
@@ -229,7 +294,7 @@ def _extract_patterns(interactions: List[Dict]) -> Dict[str, Any]:
             }
 
     # Categorise prompts by intent
-    prompts = [i for i in interactions if _evt(i) == "prompt_sent"]
+    prompts = [i for i in interactions if _is_real_prompt(i)]
     cats = {"solution_request": 0, "explanation_request": 0, "code_review": 0, "other": 0}
     for prompt in prompts:
         text = _prompt_text(prompt).lower()
@@ -290,7 +355,7 @@ def _assess_skills(interactions: List[Dict], code: Optional[str]) -> Dict[str, A
     """Assess candidate skills from interactions and code."""
     skills = {"problemSolving": "medium", "codeQuality": "medium", "independence": "medium"}
 
-    prompts       = [i for i in interactions if _evt(i) == "prompt_sent"]
+    prompts       = [i for i in interactions if _is_real_prompt(i)]
     modifications = [i for i in interactions if _evt(i) == "code_modified"]
     applies       = [i for i in interactions if _evt(i) in ("apply", "code_applied", "code_applied_from_ai")]
 

@@ -27,13 +27,10 @@ export async function runTaskDifficultyAgent(
   const files = parseFinalCode(data.finalCode);
   const fileCount = Object.keys(files).length;
 
-  // Extract task list from template
+  // Extract task list from template — try multiple field paths for robustness
   const template = data.assessment?.template as any;
-  const tasks =
-    template?.templateSpec?.tasks ||
-    template?.tasks ||
-    template?.suggestedAssessments ||
-    [];
+  const taskList_raw = template?.tasks || template?.suggestedAssessments || template?.templateSpec?.tasks || [];
+  const tasks = taskList_raw;
 
   const taskList =
     tasks.length > 0

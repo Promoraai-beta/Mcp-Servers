@@ -14,6 +14,25 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+# ── field helpers (Prisma returns camelCase; IDE may send snake_case) ─────────
+
+def _evt(e: Dict) -> str:
+    """Return event type regardless of camelCase vs snake_case."""
+    return e.get("eventType") or e.get("event_type") or ""
+
+def _prompt_text(e: Dict) -> str:
+    return e.get("promptText") or e.get("prompt_text") or ""
+
+def _response_text(e: Dict) -> str:
+    return e.get("responseText") or e.get("response_text") or ""
+
+def _code_snippet(e: Dict) -> str:
+    return e.get("codeSnippet") or e.get("code_snippet") or ""
+
+def _ts(e: Dict):
+    return e.get("timestamp") or e.get("created_at")
+
+
 def analyze_sequences(interactions: List[Dict]) -> Dict[str, Any]:
     """
     Analyze the full event sequence to understand how the candidate works with AI.
@@ -27,7 +46,7 @@ def analyze_sequences(interactions: List[Dict]) -> Dict[str, Any]:
     if not interactions:
         return _empty_result()
 
-    sorted_events = sorted(interactions, key=lambda e: e.get("timestamp", ""))
+    sorted_events = sorted(interactions, key=lambda e: _ts(e) or "")
 
     chains = _build_action_chains(sorted_events)
     temporal = _analyze_temporal_progression(sorted_events)
@@ -56,19 +75,19 @@ def _build_action_chains(events: List[Dict]) -> List[Dict[str, Any]]:
     - pasted verbatim? modified? ran tests? asked follow-up? wrote own code?
     """
     chains = []
-    prompts = [(i, e) for i, e in enumerate(events) if e.get("event_type") == "prompt_sent"]
+    prompts = [(i, e) for i, e in enumerate(events) if _evt(e) == "prompt_sent"]
 
     for idx, (event_idx, prompt_event) in enumerate(prompts):
-        prompt_text = prompt_event.get("prompt_text", "")
-        prompt_ts = prompt_event.get("timestamp", "")
+        prompt_text = _prompt_text(prompt_event)
+        prompt_ts = _ts(prompt_event) or ""
 
         # Find the AI response (next response_received after this prompt)
         response_event = None
         response_text = ""
         for j in range(event_idx + 1, min(event_idx + 10, len(events))):
-            if events[j].get("event_type") == "response_received":
+            if _evt(events[j]) == "response_received":
                 response_event = events[j]
-                response_text = events[j].get("response_text", "") or ""
+                response_text = _response_text(events[j]) or ""
                 break
 
         # Find what happened in the next 3 minutes after the prompt
@@ -83,10 +102,10 @@ def _build_action_chains(events: List[Dict]) -> List[Dict[str, Any]]:
 
         for j in range(event_idx + 1, window_end):
             e = events[j]
-            etype = e.get("event_type", "")
+            etype = _evt(e)
             if etype in ("response_received",):
                 continue  # skip the response itself
-            ts_diff = _time_diff(prompt_ts, e.get("timestamp"))
+            ts_diff = _time_diff(prompt_ts, _ts(e))
             if ts_diff and ts_diff > 180:
                 break  # stop after 3 minutes
             actions_after.append({
@@ -125,7 +144,7 @@ def _classify_chain(prompt_text: str, response_text: str, actions: List[Dict]) -
     """
     action_types = [a["eventType"] for a in actions]
 
-    has_paste = any(t in ("code_pasted_from_ai",) for t in action_types)
+    has_paste = any(t in ("code_pasted_from_ai", "code_applied", "code_copied_from_ai") for t in action_types)
     has_modification = any(t == "code_modified" for t in action_types)
     has_test_run = any(
         t == "command_executed" and _is_test_command(a.get("metadata", {}))
@@ -193,7 +212,7 @@ def _analyze_temporal_progression(events: List[Dict]) -> Dict[str, Any]:
     Check: do prompts get smarter over time?
     Split session into thirds and compare prompt quality.
     """
-    prompts = [e for e in events if e.get("event_type") == "prompt_sent"]
+    prompts = [e for e in events if _evt(e) == "prompt_sent"]
     if len(prompts) < 3:
         return {"progression": "insufficient_data", "thirds": []}
 
@@ -206,7 +225,7 @@ def _analyze_temporal_progression(events: List[Dict]) -> Dict[str, Any]:
 
     third_analysis = []
     for i, group in enumerate(thirds):
-        categories = [_classify_prompt(p.get("prompt_text", "")) for p in group]
+        categories = [_classify_prompt(_prompt_text(p)) for p in group]
         third_analysis.append({
             "period": ["early", "middle", "late"][i],
             "promptCount": len(group),
@@ -258,13 +277,13 @@ def _analyze_workflow_patterns(events: List[Dict]) -> Dict[str, Any]:
         return {"firstAction": "none", "exploredFirst": False, "ranTestsBeforeFixes": False}
 
     # First 5 events
-    first_actions = [e.get("event_type", "") for e in events[:min(5, len(events))]]
+    first_actions = [_evt(e) for e in events[:min(5, len(events))]]
 
     explored_first = any(t in ("file_created", "file_modified") for t in first_actions[:3]) is False
     # Check: did they run tests early?
     early_test_run = False
     for e in events[:min(15, len(events))]:
-        if e.get("event_type") == "command_executed":
+        if _evt(e) == "command_executed":
             meta = e.get("metadata") or {}
             if isinstance(meta, str):
                 try:
@@ -292,7 +311,7 @@ def _analyze_adaptation(events: List[Dict]) -> Dict[str, Any]:
     """
     modifications = [
         e for e in events
-        if e.get("event_type") == "code_modified"
+        if _evt(e) == "code_modified"
     ]
 
     depths = []

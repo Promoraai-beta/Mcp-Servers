@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 def _evt(e: Dict) -> str:
     return e.get("eventType") or e.get("event_type") or ""
 
+
+def _compute_confidence(n_events: int) -> int:
+    """Return confidence score based on event data richness."""
+    if n_events == 0:
+        return 30
+    elif n_events < 10:
+        return 55
+    elif n_events < 30:
+        return 70
+    else:
+        return 85
+
 def _prompt_text(e: Dict) -> str:
     return e.get("promptText") or e.get("prompt_text") or ""
 
@@ -32,6 +44,19 @@ def _response_text(e: Dict) -> str:
 
 def _ts(e: Dict):
     return e.get("timestamp") or e.get("created_at")
+
+
+def _safe_ts(e: Dict) -> datetime:
+    """Return a datetime for an event, safely handling ISO strings and missing values."""
+    v = e.get("timestamp") or e.get("createdAt")
+    if v is None:
+        return datetime.now()
+    if isinstance(v, str):
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except Exception:
+            return datetime.now()
+    return v
 
 
 async def flag_sanity_checks(session_id: str, events: Optional[List[Dict]] = None) -> Dict[str, Any]:
@@ -87,7 +112,7 @@ async def flag_sanity_checks(session_id: str, events: Optional[List[Dict]] = Non
             "anomalies": anomalies,
             "plagiarismAnalysis": plagiarism_analysis,
             "sanityChecks": sanity_checks,
-            "confidence": 85,
+            "confidence": _compute_confidence(len(events)),
             "explanation": f"Risk assessment completed: {len(violations)} violations, {len(red_flags)} red flags"
         }
     
@@ -99,10 +124,20 @@ async def flag_sanity_checks(session_id: str, events: Optional[List[Dict]] = Non
         }
 
 
-def _detect_violations(events: List[Dict]) -> List[Dict[str, Any]]:
+def _detect_violations(events: List[Dict], data: Optional[Dict] = None) -> List[Dict[str, Any]]:
     """Detect violations from events."""
     violations = []
-    
+
+    # Normalize thresholds by session duration (in minutes)
+    _data = data or {}
+    session_minutes = _data.get("sessionDurationMinutes") or (_data.get("timeLimit", 3600) / 60)
+    time_factor = max(0.5, session_minutes / 60.0)
+
+    # Adjusted thresholds scaled to session length
+    excessive_copies_threshold = round(5 * time_factor)       # 5 per hour baseline
+    suspicious_low_mods_threshold = round(3 * time_factor)
+    suspicious_high_prompts_threshold = round(10 * time_factor)
+
     # Check for solution request patterns
     prompts = [e for e in events if _evt(e) == "prompt_sent" and _prompt_text(e)]
 
@@ -128,7 +163,7 @@ def _detect_violations(events: List[Dict]) -> List[Dict[str, Any]]:
     # Check for excessive code copying
     copy_events = [e for e in events if _evt(e) in ["code_copied_from_ai", "code_copied"]]
 
-    if len(copy_events) > 5:
+    if len(copy_events) > excessive_copies_threshold:
         violations.append({
             "severity": "high",
             "type": "excessive_copying",
@@ -138,14 +173,14 @@ def _detect_violations(events: List[Dict]) -> List[Dict[str, Any]]:
 
     # Check for suspicious timing (too fast completion)
     modifications = [e for e in events if _evt(e) == "code_modified"]
-    if len(modifications) < 3 and len(prompts) > 10:
+    if len(modifications) < suspicious_low_mods_threshold and len(prompts) > suspicious_high_prompts_threshold:
         violations.append({
             "severity": "medium",
             "type": "suspicious_timing",
             "description": "Very few modifications compared to prompts (potential copy-paste)",
             "timestamp": datetime.now().isoformat()
         })
-    
+
     return violations
 
 
@@ -200,10 +235,10 @@ def _detect_red_flags(events: List[Dict], submissions: List[Dict]) -> List[Dict[
     
     # Flag 2: Rapid code completion
     if len(events) > 0:
-        first_event = min(events, key=lambda e: e.get("timestamp", datetime.now()))
-        last_event = max(events, key=lambda e: e.get("timestamp", datetime.now()))
-        
-        time_diff = _time_diff(first_event.get("timestamp"), last_event.get("timestamp"))
+        first_event = min(events, key=lambda e: _safe_ts(e))
+        last_event = max(events, key=lambda e: _safe_ts(e))
+
+        time_diff = _time_diff(_safe_ts(first_event), _safe_ts(last_event))
         if time_diff and time_diff < 300:  # Less than 5 minutes
             modifications = [e for e in events if _evt(e) == "code_modified"]
             if len(modifications) > 10:
@@ -235,7 +270,7 @@ def _detect_anomalies(events: List[Dict]) -> List[Dict[str, Any]]:
         return anomalies
     
     # Analyze timing gaps
-    sorted_events = sorted(events, key=lambda e: e.get("timestamp", datetime.now()))
+    sorted_events = sorted(events, key=lambda e: _safe_ts(e))
     gaps = []
     
     for i in range(1, len(sorted_events)):

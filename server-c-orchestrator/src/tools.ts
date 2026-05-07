@@ -45,14 +45,27 @@ export function buildTimeline(data: SessionData) {
 
 export function summarizeAiInteractions(data: SessionData) {
   const interactions = data.aiInteractions;
-  const pasteEvents = data.events.filter((e) => e.eventType.toLowerCase().includes('paste'));
+  // Paste/apply/copy events live in aiInteractions, not events
+  const pasteEvents = data.aiInteractions.filter((e) =>
+    e.eventType.toLowerCase().includes('paste') ||
+    e.eventType === 'code_applied_from_ai' ||
+    e.eventType === 'code_applied' ||
+    e.eventType === 'code_copied_from_ai' ||
+    e.eventType === 'code_pasted_from_ai'
+  );
   const tabSwitches = data.events.filter((e) =>
-    e.eventType.toLowerCase().includes('tab_switch') || e.eventType.toLowerCase().includes('tab_blur')
+    e.eventType.toLowerCase().includes('tab_switch') ||
+    e.eventType.toLowerCase().includes('tab_blur') ||
+    e.eventType === 'assessment_tab_switched'
   );
   const promptsSent = interactions.filter((i) => i.eventType === 'prompt_sent').length;
   const responsesReceived = interactions.filter((i) => i.eventType === 'response_received').length;
-  const copies = interactions.filter((i) => i.eventType === 'copy').length;
-  const applies = interactions.filter((i) => i.eventType === 'apply').length;
+  const copies = interactions.filter((i) =>
+    i.eventType === 'code_copied_from_ai' || i.eventType === 'copy'
+  ).length;
+  const applies = interactions.filter((i) =>
+    i.eventType === 'code_applied_from_ai' || i.eventType === 'code_applied' || i.eventType === 'apply'
+  ).length;
 
   let suspiciousPastes = 0;
   for (const paste of pasteEvents) {
@@ -65,10 +78,17 @@ export function summarizeAiInteractions(data: SessionData) {
     if (recent) suspiciousPastes++;
   }
 
+  const codeModifiedEvents = data.events.filter((e) =>
+    e.eventType.toLowerCase().includes('code_modified') ||
+    e.eventType.toLowerCase().includes('manual_edit') ||
+    e.eventType.toLowerCase().includes('keystroke')
+  );
+
   return {
     totalInteractions: interactions.length, promptsSent, responsesReceived,
     copies, applies, totalPastes: pasteEvents.length, suspiciousPastes,
     tabSwitches: tabSwitches.length,
+    codeModified: codeModifiedEvents.length,
     aiUsageIntensity: promptsSent === 0 ? 'none' : promptsSent <= 3 ? 'low' : promptsSent <= 8 ? 'medium' : 'high',
   };
 }
@@ -126,7 +146,8 @@ export function analyzeTimingBehavior(data: SessionData) {
     .filter(([k]) => parseInt(k) >= Math.floor((endMs - startMs) / bucketSize) - 2)
     .map(([, v]) => v);
   const lastAvg = lastBuckets.reduce((a, b) => a + b, 0) / Math.max(lastBuckets.length, 1);
-  const pacing = idlePeriods.length > 3 ? 'slow_start' : lastAvg > avg * 1.8 ? 'rushed_ending' : 'steady';
+  const idleThreshold = Math.max(1, Math.floor(totalMinutes / 15));
+  const pacing = idlePeriods.length > idleThreshold ? 'slow_start' : lastAvg > avg * 1.8 ? 'rushed_ending' : 'steady';
 
   return { totalMinutes, idlePeriods, burstPeriods, pacing };
 }

@@ -14,6 +14,25 @@ from typing import Dict, List, Any, Optional
 logger = logging.getLogger(__name__)
 
 
+# ── field helpers (Prisma returns camelCase; IDE may send snake_case) ─────────
+
+def _evt(e: Dict) -> str:
+    """Return event type regardless of camelCase vs snake_case."""
+    return e.get("eventType") or e.get("event_type") or ""
+
+def _prompt_text(e: Dict) -> str:
+    return e.get("promptText") or e.get("prompt_text") or ""
+
+def _response_text(e: Dict) -> str:
+    return e.get("responseText") or e.get("response_text") or ""
+
+def _code_snippet(e: Dict) -> str:
+    return e.get("codeSnippet") or e.get("code_snippet") or ""
+
+def _ts(e: Dict):
+    return e.get("timestamp") or e.get("created_at")
+
+
 def analyze_responses(interactions: List[Dict]) -> Dict[str, Any]:
     """
     Analyze AI responses and how the candidate used them.
@@ -46,27 +65,27 @@ def analyze_responses(interactions: List[Dict]) -> Dict[str, Any]:
 def _pair_prompts_responses(interactions: List[Dict]) -> List[Dict[str, Any]]:
     """Pair each prompt_sent with its response_received."""
     pairs = []
-    sorted_events = sorted(interactions, key=lambda e: e.get("timestamp", ""))
+    sorted_events = sorted(interactions, key=lambda e: _ts(e) or "")
 
     i = 0
     while i < len(sorted_events):
         event = sorted_events[i]
-        if event.get("event_type") == "prompt_sent":
-            prompt_text = event.get("prompt_text", "") or ""
+        if _evt(event) == "prompt_sent":
+            prompt_text = _prompt_text(event)
             response_text = ""
             response_ts = None
 
             # Find the next response_received
             for j in range(i + 1, min(i + 10, len(sorted_events))):
-                if sorted_events[j].get("event_type") == "response_received":
-                    response_text = sorted_events[j].get("response_text", "") or ""
-                    response_ts = sorted_events[j].get("timestamp")
+                if _evt(sorted_events[j]) == "response_received":
+                    response_text = _response_text(sorted_events[j]) or ""
+                    response_ts = _ts(sorted_events[j])
                     break
 
             pairs.append({
                 "promptText": prompt_text,
                 "responseText": response_text,
-                "promptTimestamp": event.get("timestamp"),
+                "promptTimestamp": _ts(event),
                 "responseTimestamp": response_ts,
             })
         i += 1
@@ -127,7 +146,7 @@ def _analyze_adoption(
     """
     paste_events = [
         e for e in interactions
-        if e.get("event_type") in ("code_pasted_from_ai", "code_copied_from_ai")
+        if _evt(e) in ("code_pasted_from_ai", "code_copied_from_ai", "code_applied")
     ]
 
     verbatim_count = 0
@@ -136,12 +155,12 @@ def _analyze_adoption(
 
     for paste in paste_events:
         meta = _parse_metadata(paste.get("metadata"))
-        snippet = paste.get("code_snippet") or meta.get("codeSnippet", "")
+        snippet = _code_snippet(paste) or meta.get("codeSnippet", "")
         if not snippet or len(snippet) < 20:
             continue
 
         # Find the most recent response before this paste
-        paste_ts = paste.get("timestamp", "")
+        paste_ts = _ts(paste) or ""
         closest_response = None
         for pair in reversed(pairs):
             resp_ts = pair.get("responseTimestamp", "") or ""

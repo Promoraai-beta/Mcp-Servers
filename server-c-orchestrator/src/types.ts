@@ -24,14 +24,22 @@ export interface SessionData {
     level?: string;
     techStack?: any;
     template?: any;
+    assessmentManifest?: any;  // canonical bug list from Server B — used by bugFixAgent + taskDifficultyAgent
+  };
+  videoAnalysis?: {
+    overallRisk: string;       // low | medium | high
+    suspiciousActivities: string[];
+    verdict: string;
+    confidence: number;
+    frameCount: number;
   };
 }
 
 export interface AiInteractionRecord {
   id: string;
   eventType: string;
-  prompt?: string;
-  response?: string;
+  promptText?: string;
+  responseText?: string;
   model?: string;
   promptTokens?: number;
   completionTokens?: number;
@@ -39,6 +47,10 @@ export interface AiInteractionRecord {
   timestamp: Date;
   tabId?: string;
   conversationTurn?: number;
+  // Code diffs — populated for code_applied_from_ai, code_modified events
+  codeSnippet?: string;
+  codeBefore?: string;
+  codeAfter?: string;
 }
 
 export interface CodeSnapshotRecord {
@@ -68,6 +80,7 @@ export interface AgentFinding {
   evidence: EvidenceItem[];
   signals: Signal[];
   rawNotes?: string;    // agent's internal reasoning notes
+  failed?: boolean;     // true if agent errored during execution
 }
 
 export interface EvidenceItem {
@@ -94,6 +107,13 @@ export interface StructuredBrief {
   conflicts: ConflictItem[];
   rankedSignals: RankedSignal[];
   overallDataQuality: number; // 0–1, how much data was available
+  videoAnalysis?: {
+    overallRisk: string;       // low | medium | high
+    suspiciousActivities: string[];
+    verdict: string;
+    confidence: number;
+    frameCount: number;
+  };
 }
 
 export interface TimelineSegment {

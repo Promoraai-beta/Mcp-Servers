@@ -27,11 +27,15 @@ export async function runBugFixAgent(
 ): Promise<AgentFinding> {
   const files = parseFinalCode(data.finalCode);
 
-  // Extract manifest bugs from the assessment template if available
+  // Extract manifest bugs — prefer assessmentManifest (structured), fall back to template
+  const manifest = data.assessment?.assessmentManifest as any;
   const template = data.assessment?.template as any;
   const intentionalBugs =
+    manifest?.intentionalIssues ||
+    manifest?.bugs ||
     template?.templateSpec?.intentionalIssues ||
     template?.intentionalIssues ||
+    template?.bugs ||
     [];
 
   const bugList =
@@ -42,8 +46,8 @@ export async function runBugFixAgent(
       : 'No manifest available — infer bugs from code patterns';
 
   const codeSample = Object.entries(files)
-    .slice(0, 5)
-    .map(([name, code]) => `=== ${name} ===\n${code.split('\n').slice(0, 150).join('\n')}`)
+    .slice(0, 8)
+    .map(([name, code]) => `=== ${name} ===\n${code.split('\n').slice(0, 300).join('\n')}`)
     .join('\n\n');
 
   const userPrompt = `

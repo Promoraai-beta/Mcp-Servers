@@ -30,10 +30,10 @@ export async function runCodeQualityAgent(
   const files = parseFinalCode(data.finalCode);
   const metrics = analyzeCodeMetrics(files);
 
-  // Build a concise code sample (first 200 lines of each file, capped)
+  // Build a concise code sample (first 400 lines of each file, capped)
   const codeSample = Object.entries(files)
-    .slice(0, 5)
-    .map(([name, code]) => `=== ${name} ===\n${code.split('\n').slice(0, 200).join('\n')}`)
+    .slice(0, 8)
+    .map(([name, code]) => `=== ${name} ===\n${code.split('\n').slice(0, 400).join('\n')}`)
     .join('\n\n');
 
   const userPrompt = `

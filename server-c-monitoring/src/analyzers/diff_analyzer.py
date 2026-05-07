@@ -16,6 +16,25 @@ from typing import Dict, List, Any, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+# ── field helpers (Prisma returns camelCase; IDE may send snake_case) ─────────
+
+def _evt(e: Dict) -> str:
+    """Return event type regardless of camelCase vs snake_case."""
+    return e.get("eventType") or e.get("event_type") or ""
+
+def _code_before(e: Dict) -> str:
+    return e.get("codeBefore") or e.get("code_before") or ""
+
+def _code_after(e: Dict) -> str:
+    return e.get("codeAfter") or e.get("code_after") or ""
+
+def _code_snippet(e: Dict) -> str:
+    return e.get("codeSnippet") or e.get("code_snippet") or ""
+
+def _ts(e: Dict):
+    return e.get("timestamp") or e.get("created_at")
+
+
 def analyze_diffs(
     interactions: List[Dict],
     injected_bug_ids: List[str],
@@ -59,16 +78,16 @@ def _extract_diff_events(interactions: List[Dict]) -> List[Dict[str, Any]]:
 
     for event in interactions:
         meta = _parse_metadata(event.get("metadata"))
-        code_before = event.get("code_before") or meta.get("codeBefore", "")
-        code_after = event.get("code_after") or meta.get("codeAfter", "")
-        code_snippet = event.get("code_snippet") or meta.get("codeSnippet", "")
+        code_before = _code_before(event) or meta.get("codeBefore", "")
+        code_after = _code_after(event) or meta.get("codeAfter", "")
+        code_snippet = _code_snippet(event) or meta.get("codeSnippet", "")
 
         if not code_before and not code_after and not code_snippet:
             continue
 
         diff_events.append({
-            "eventType": event.get("event_type", ""),
-            "timestamp": event.get("timestamp", ""),
+            "eventType": _evt(event),
+            "timestamp": _ts(event) or "",
             "codeBefore": code_before or "",
             "codeAfter": code_after or "",
             "codeSnippet": code_snippet or "",
@@ -104,7 +123,7 @@ def _build_file_change_map(diff_events: List[Dict]) -> Dict[str, Any]:
             file_map[fp]["linesAdded"] += added
             file_map[fp]["linesRemoved"] += removed
 
-        if event.get("eventType") in ("code_pasted_from_ai", "code_copied_from_ai"):
+        if event.get("eventType") in ("code_pasted_from_ai", "code_copied_from_ai", "code_applied"):
             file_map[fp]["aiPasteCount"] += 1
         else:
             file_map[fp]["selfEditCount"] += 1
@@ -119,15 +138,15 @@ def _track_code_origins(interactions: List[Dict]) -> Dict[str, Any]:
     total_modifications = 0
 
     for event in interactions:
-        etype = event.get("event_type", "")
+        etype = _evt(event)
         meta = _parse_metadata(event.get("metadata"))
 
-        if etype in ("code_pasted_from_ai", "code_copied_from_ai"):
-            snippet = event.get("code_snippet") or meta.get("codeSnippet", "")
+        if etype in ("code_pasted_from_ai", "code_copied_from_ai", "code_applied"):
+            snippet = _code_snippet(event) or meta.get("codeSnippet", "")
             ai_paste_chars += len(snippet)
         elif etype == "code_modified":
-            code_after = event.get("code_after") or meta.get("codeAfter", "")
-            code_before = event.get("code_before") or meta.get("codeBefore", "")
+            code_after = _code_after(event) or meta.get("codeAfter", "")
+            code_before = _code_before(event) or meta.get("codeBefore", "")
             # Net new chars from self-edit
             if code_after and code_before:
                 self_written_chars += max(0, len(code_after) - len(code_before))

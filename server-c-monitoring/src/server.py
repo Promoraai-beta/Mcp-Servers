@@ -73,20 +73,86 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
         )]
 
 
+async def run_http_server(port: int):
+    """
+    Run as a lightweight HTTP REST API for deployment.
+    Exposes the same tool handlers over /health, /tools, /call_tool.
+    """
+    from fastapi import FastAPI, Request
+    from fastapi.middleware.cors import CORSMiddleware
+    import uvicorn
+
+    app = FastAPI(title="MCP Server C - Live Monitoring")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok", "server": "promora-monitoring"}
+
+    @app.get("/tools")
+    async def list_tools_endpoint():
+        tools = get_tools()
+        return {
+            "tools": [
+                {"name": t.name, "description": t.description, "inputSchema": t.inputSchema}
+                for t in tools
+            ]
+        }
+
+    @app.post("/call_tool")
+    async def call_tool_endpoint(request: Request):
+        body = await request.json()
+        name = body.get("name")
+        arguments = body.get("arguments", {})
+
+        if name not in TOOL_HANDLERS:
+            return {"error": f"Unknown tool: {name}"}
+
+        try:
+            handler = TOOL_HANDLERS[name]
+            result = await handler(arguments)
+            if result and hasattr(result[0], "text"):
+                try:
+                    return {"result": json.loads(result[0].text)}
+                except Exception:
+                    return {"result": result[0].text}
+            return {"result": result}
+        except Exception as e:
+            logger.error(f"Error in tool {name}: {e}", exc_info=True)
+            return {"error": str(e)}
+
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
+    srv = uvicorn.Server(config)
+    await srv.serve()
+
+
 async def main():
     """
-    Run MCP server using stdio transport.
+    Run MCP server.
+    - MCP_TRANSPORT=http  → HTTP REST API on MCP_PORT (default 8003) — used in deployment
+    - MCP_TRANSPORT unset → stdio transport — used for local dev (spawned by backend)
     """
-    logger.info("Starting MCP Server C (Live Monitoring) via stdio...")
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+
+    if transport == "http":
+        port = int(os.environ.get("MCP_PORT", "8003"))
+        logger.info(f"Starting MCP Server C (Live Monitoring) via HTTP on port {port}...")
+        await run_http_server(port)
+    else:
+        logger.info("Starting MCP Server C (Live Monitoring) via stdio...")
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options()
+            )
 
 
 if __name__ == "__main__":
-    # Run MCP server
     asyncio.run(main())
 

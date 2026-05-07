@@ -45,6 +45,12 @@ function makeClient(): { client: OpenAI; model: string; strongModel: string } {
   };
 }
 
+// ── Timeout helper ─────────────────────────────────────────────────────────────
+
+function timeout(ms: number): Promise<never> {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(`Agent timeout after ${ms}ms`)), ms));
+}
+
 // ── Main pipeline ──────────────────────────────────────────────────────────────
 
 export async function runOrchestrator(sessionId: string, data: SessionData): Promise<ServerCInsight> {
@@ -52,15 +58,15 @@ export async function runOrchestrator(sessionId: string, data: SessionData): Pro
   const start = Date.now();
   const { client, model, strongModel } = makeClient();
 
-  // Step 1 — 6 analyzers in parallel
+  // Step 1 — 6 analyzers in parallel, each with a 30s timeout
   console.log('[Orchestrator] Running 6 analyzers in parallel...');
   const settled = await Promise.allSettled([
-    runCodeQualityAgent(data, client, model),
-    runAiUsageAgent(data, client, model),
-    runTimeBehaviorAgent(data, client, model),
-    runBugFixAgent(data, client, model),
-    runTaskDifficultyAgent(data, client, model),
-    runCommDocsAgent(data, client, model),
+    Promise.race([runCodeQualityAgent(data, client, model), timeout(30000)]),
+    Promise.race([runAiUsageAgent(data, client, model), timeout(30000)]),
+    Promise.race([runTimeBehaviorAgent(data, client, model), timeout(30000)]),
+    Promise.race([runBugFixAgent(data, client, model), timeout(30000)]),
+    Promise.race([runTaskDifficultyAgent(data, client, model), timeout(30000)]),
+    Promise.race([runCommDocsAgent(data, client, model), timeout(30000)]),
   ]);
 
   const findings: AgentFinding[] = [
@@ -85,6 +91,11 @@ export async function runOrchestrator(sessionId: string, data: SessionData): Pro
 
   // Step 5 — Build insight object
   const findingByName = (name: string) => findings.find((f) => f.agentName === name);
+  // Return null for failed agents so dashboard can distinguish missing data from real scores
+  const scoreOrNull = (name: string): number | null => {
+    const f = findingByName(name);
+    return f?.failed ? null : (f?.score ?? null);
+  };
 
   const insight: ServerCInsight = {
     version: '1.0',
@@ -95,12 +106,12 @@ export async function runOrchestrator(sessionId: string, data: SessionData): Pro
     verdict,
     scores: {
       overall: verdict.overallScore,
-      codeQuality: findingByName('Code Quality')?.score ?? 50,
-      bugFixQuality: findingByName('Bug Fix Quality')?.score ?? 50,
-      timeBehavior: findingByName('Time Behavior')?.score ?? 50,
-      aiUsage: findingByName('AI Usage')?.score ?? 50,
-      taskDifficulty: findingByName('Task Difficulty')?.score ?? 50,
-      commDocs: findingByName('Comm & Docs')?.score ?? 50,
+      codeQuality: scoreOrNull('Code Quality') ?? 50,
+      bugFixQuality: scoreOrNull('Bug Fix Quality') ?? 50,
+      timeBehavior: scoreOrNull('Time Behavior') ?? 50,
+      aiUsage: scoreOrNull('AI Usage') ?? 50,
+      taskDifficulty: scoreOrNull('Task Difficulty') ?? 50,
+      commDocs: scoreOrNull('Comm & Docs') ?? 50,
     },
     overallScore: verdict.overallScore,
     strengths: verdict.strengths,
@@ -118,5 +129,13 @@ export async function runOrchestrator(sessionId: string, data: SessionData): Pro
 function unwrap(result: PromiseSettledResult<AgentFinding>, agentName: string): AgentFinding {
   if (result.status === 'fulfilled') return result.value;
   console.error(`[Orchestrator] Agent "${agentName}" failed:`, result.reason?.message);
-  return { agentName, score: 50, confidence: 0, summary: `Agent failed: ${result.reason?.message ?? 'unknown'}`, evidence: [], signals: [] };
+  return {
+    agentName,
+    score: 50,
+    confidence: 0,
+    summary: `Agent failed: ${result.reason?.message ?? 'unknown'}`,
+    evidence: [],
+    signals: [],
+    failed: true,
+  };
 }

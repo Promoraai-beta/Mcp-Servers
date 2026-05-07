@@ -33,8 +33,12 @@ export async function runCommDocsAgent(
     .filter(([name]) =>
       name.endsWith('.md') ||
       name.endsWith('.txt') ||
+      name.endsWith('.rst') ||
+      name.endsWith('.adoc') ||
       name.toLowerCase().includes('readme') ||
-      name.toLowerCase().includes('doc')
+      name.toLowerCase().includes('doc') ||
+      name.toUpperCase().includes('CHANGELOG') ||
+      name.toUpperCase().includes('CONTRIBUTING')
     )
     .map(([name, content]) => `=== ${name} ===\n${content.slice(0, 500)}`)
     .join('\n\n');
@@ -46,7 +50,7 @@ export async function runCommDocsAgent(
       const commentLines = code
         .split('\n')
         .filter((l) => l.trim().startsWith('//') || l.trim().startsWith('#'))
-        .slice(0, 10)
+        .slice(0, 30)
         .join('\n');
       return commentLines ? `=== ${name} comments ===\n${commentLines}` : '';
     })

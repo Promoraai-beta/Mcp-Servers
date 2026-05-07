@@ -20,6 +20,53 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 
+# ─── camelCase-safe field helpers ─────────────────────────────────────────────
+
+def _evt(e):
+    return e.get("eventType") or e.get("event_type", "")
+
+def _prompt_text(e):
+    return e.get("promptText") or e.get("prompt_text", "")
+
+def _response_text(e):
+    return e.get("responseText") or e.get("response_text", "")
+
+def _ts(e):
+    v = e.get("timestamp")
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    return v
+
+
+# ─── Known bug IDs (used for targeted checks; custom bugs fall through to
+#     description-based keyword matching) ──────────────────────────────────────
+
+KNOWN_BUGS = {
+    "bug_key_prop",
+    "bug_input_not_cleared",
+    "bug_no_focus_styles",
+    "bug_useeffect_deps",
+    "bug_stale_closure",
+    "bug_misleading_comment",
+    "bug_no_error_handling",
+    "bug_sql_injection",
+    "bug_missing_validation",
+    "bug_no_404",
+    "bug_auth_missing",
+    "bug_error_handler_200",
+    "bug_spec_mismatch",
+    "bug_auth_not_wired",
+    "bug_post_returns_200",
+    "bug_no_rate_limit",
+    "bug_unnecessary_rerenders",
+}
+
+
 def build_bug_narratives(
     injected_bug_ids: List[str],
     expected_signals: Dict[str, Any],
@@ -75,7 +122,7 @@ def _build_single_narrative(
     fix_quality = fix_evidence.get("fixQuality", "not_addressed")
 
     # 4. Final code check (was it actually fixed in the final state?)
-    final_fixed = _check_final_state(bug_id, final_files)
+    final_fixed = _check_final_state(bug_id, description, final_files)
 
     # 5. Verification: did they test after addressing this bug?
     verified = _check_verification(bug_id, diff_ev, terminal, interactions)
@@ -121,21 +168,21 @@ def _check_discovery(
     """Did the candidate acknowledge/discover this bug?"""
     keywords = _bug_keywords(bug_id, description)
 
-    # Check prompts
+    # Check prompts — accept both legacy and new frontend event names
     prompts = [
         e for e in interactions
-        if e.get("event_type") == "prompt_sent"
+        if _evt(e) in ("prompt_sent", "prompt_submitted")
     ]
 
     first_mention = None
     mentions = 0
 
     for p in prompts:
-        text = (p.get("prompt_text", "") or "").lower()
+        text = (_prompt_text(p) or "").lower()
         if any(kw in text for kw in keywords):
             mentions += 1
             if first_mention is None:
-                first_mention = p.get("timestamp")
+                first_mention = _ts(p)
 
     return {
         "discovered": mentions > 0,
@@ -181,7 +228,7 @@ def _check_ai_assistance(
 
 # ─── Final state check ────────────────────────────────────────────────────────
 
-def _check_final_state(bug_id: str, final_files: Dict[str, str]) -> bool:
+def _check_final_state(bug_id: str, description: str, final_files: Dict[str, str]) -> bool:
     """Check if the bug is actually fixed in the final code."""
     if not final_files:
         return False
@@ -189,34 +236,83 @@ def _check_final_state(bug_id: str, final_files: Dict[str, str]) -> bool:
     all_code = "\n".join(v for v in final_files.values() if isinstance(v, str))
     code_lower = all_code.lower()
 
-    # Reuse the existing fix_checks logic but with cleaner patterns
+    # Fix checkers for known bugs — use regex for spacing-insensitive matching
     fix_checks = {
-        "bug_key_prop": lambda c: "key={" in c,
-        "bug_input_not_cleared": lambda c: "setinput('')" in c or 'setinput("")' in c,
-        "bug_no_focus_styles": lambda c: ":focus" in c or "focus-visible" in c or "outline" in c,
-        "bug_useeffect_deps": lambda c: bool(re.search(r"useeffect\([^)]*\[[^\]]+\]", c)),
-        "bug_stale_closure": lambda c: "usecallback" in c or "useref" in c,
-        "bug_misleading_comment": lambda c: "ai-generated: this component handles all task management correctly" not in c,
-        "bug_no_error_handling": lambda c: ".catch(" in c or "response.ok" in c or "res.ok" in c,
-        "bug_sql_injection": lambda c: ("?" in c and ("prepare" in c or "placeholder" in c)),
-        "bug_missing_validation": lambda c: "trim" in c or "!title" in c or "required" in c,
-        "bug_no_404": lambda c: "404" in c and "notfound" in c.replace(" ", "").replace("_", ""),
-        "bug_auth_missing": lambda c: "authenticate" in c and ("middleware" in c or "require" in c),
-        "bug_error_handler_200": lambda c: bool(re.search(r"status\s*\(\s*500", c)),
-        "bug_spec_mismatch": lambda c: "archived" in c and ("filter" in c or "where" in c),
-        "bug_auth_not_wired": lambda c: "authenticate" in c and ("router" in c or "app.use" in c),
-        "bug_post_returns_200": lambda c: bool(re.search(r"status\s*\(\s*201", c)),
-        "bug_no_rate_limit": lambda c: "ratelimit" in c.replace("-", "").replace("_", "").replace(" ", ""),
-        "bug_unnecessary_rerenders": lambda c: "memo" in c or "usememo" in c or "usecallback" in c,
+        "bug_key_prop": lambda c: bool(re.search(r'key\s*=\s*\{', c)),
+        "bug_input_not_cleared": lambda c: bool(
+            re.search(r'setinput\s*\(\s*[\'"]?\s*[\'"]?\s*\)', c, re.IGNORECASE)
+        ),
+        "bug_no_focus_styles": lambda c: bool(
+            re.search(r':focus|focus-visible|outline', c, re.IGNORECASE)
+        ),
+        "bug_useeffect_deps": lambda c: bool(
+            re.search(r'useeffect\s*\([^)]*\[[^\]]+\]', c, re.IGNORECASE)
+        ),
+        "bug_stale_closure": lambda c: bool(
+            re.search(r'usecallback|useref', c, re.IGNORECASE)
+        ),
+        "bug_misleading_comment": lambda c: not bool(
+            re.search(
+                r'ai-generated\s*:\s*this component handles all task management correctly',
+                c, re.IGNORECASE
+            )
+        ),
+        "bug_no_error_handling": lambda c: bool(
+            re.search(r'\.catch\s*\(|response\.ok|res\.ok', c, re.IGNORECASE)
+        ),
+        "bug_sql_injection": lambda c: bool(
+            re.search(r'\?', c) and re.search(r'prepare|placeholder', c, re.IGNORECASE)
+        ),
+        "bug_missing_validation": lambda c: bool(
+            re.search(r'\.trim\s*\(\s*\)|!title|required', c, re.IGNORECASE)
+        ),
+        "bug_no_404": lambda c: bool(
+            re.search(r'404', c) and re.search(r'notfound|not_found|not found', c, re.IGNORECASE)
+        ),
+        "bug_auth_missing": lambda c: bool(
+            re.search(r'authenticate', c, re.IGNORECASE) and
+            re.search(r'middleware|require', c, re.IGNORECASE)
+        ),
+        "bug_error_handler_200": lambda c: bool(re.search(r'status\s*\(\s*500', c, re.IGNORECASE)),
+        "bug_spec_mismatch": lambda c: bool(
+            re.search(r'archived', c, re.IGNORECASE) and
+            re.search(r'filter|where', c, re.IGNORECASE)
+        ),
+        "bug_auth_not_wired": lambda c: bool(
+            re.search(r'authenticate', c, re.IGNORECASE) and
+            re.search(r'router|app\.use', c, re.IGNORECASE)
+        ),
+        "bug_post_returns_200": lambda c: bool(re.search(r'status\s*\(\s*201', c, re.IGNORECASE)),
+        "bug_no_rate_limit": lambda c: bool(
+            re.search(r'rate.?limit|throttle', c, re.IGNORECASE)
+        ),
+        "bug_unnecessary_rerenders": lambda c: bool(
+            re.search(r'\bmemo\b|usememo|usecallback', c, re.IGNORECASE)
+        ),
     }
 
-    checker = fix_checks.get(bug_id)
-    if checker:
-        try:
-            return checker(code_lower)
-        except Exception:
-            return False
-    return False
+    # For known bugs, use the targeted checker
+    if bug_id in KNOWN_BUGS:
+        checker = fix_checks.get(bug_id)
+        if checker:
+            try:
+                return checker(code_lower)
+            except Exception:
+                return False
+        return False
+
+    # For custom / unknown bugs: fall back to description keyword search in the
+    # diff/final code — if the description keywords appear near fix-like context
+    # we optimistically consider it addressed rather than auto-failing.
+    desc_keywords = [w.lower() for w in description.split() if len(w) > 3]
+    if desc_keywords:
+        hits = sum(1 for kw in desc_keywords if kw in code_lower)
+        # If more than half of the meaningful description words appear in the
+        # final code, assume the area was touched.
+        return hits >= max(1, len(desc_keywords) // 2)
+
+    # Cannot determine — do not penalise custom bugs by returning False
+    return True
 
 
 # ─── Verification ──────────────────────────────────────────────────────────────

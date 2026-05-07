@@ -81,6 +81,36 @@ class DatabaseAPIClient:
         params = {"limit": limit}
         return self._make_request(f"/recent-interactions/{session_id}", params)
     
+    def get_manifest(self, session_id: str) -> dict:
+        """Fetch the assessment template/manifest for a session."""
+        try:
+            result = self._make_request(f"/sessions/{session_id}/manifest")
+            # _make_request returns a list for most endpoints; manifest is a single object.
+            # If the backend returns a list with one item, unwrap it.
+            if isinstance(result, list):
+                return result[0] if result else {}
+            return result if isinstance(result, dict) else {}
+        except Exception as e:
+            logger.warning(f"Could not fetch manifest for {session_id}: {e}")
+            return {}
+
+    def get_session_data(self, session_id: str) -> dict:
+        """Fetch high-level session data."""
+        try:
+            result = self._make_request(f"/sessions/{session_id}")
+            if isinstance(result, list):
+                return result[0] if result else {}
+            return result if isinstance(result, dict) else {}
+        except Exception as e:
+            logger.warning(f"Could not fetch session data for {session_id}: {e}")
+            return {}
+
+    def get_session_with_manifest(self, session_id: str) -> tuple:
+        """Fetch session data and manifest together. Returns (session_data, manifest)."""
+        data = self.get_session_data(session_id)
+        manifest = self.get_manifest(session_id)
+        return data, manifest
+
     def is_session_active(self, session_id: str) -> bool:
         """Check if session is active."""
         try:

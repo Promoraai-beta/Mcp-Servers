@@ -30,7 +30,7 @@ export async function runAiUsageAgent(
   // Include recent AI prompts/responses as evidence (truncated)
   const recentInteractions = data.aiInteractions
     .slice(-10)
-    .map((i) => `[${i.eventType}] ${i.prompt?.slice(0, 100) ?? ''} ${i.response?.slice(0, 100) ?? ''}`)
+    .map((i) => `[${i.eventType}] ${i.promptText?.slice(0, 100) ?? ''} ${i.responseText?.slice(0, 100) ?? ''}`)
     .join('\n');
 
   const userPrompt = `
